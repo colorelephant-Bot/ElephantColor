@@ -5,6 +5,8 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     ParseMode
 )
 from telegram.ext import (
@@ -108,14 +110,15 @@ def is_effectively_active(update: Update, context: CallbackContext) -> bool:
 # GAME LOGIC
 # =============================
 
-CASE1 = [10, 10, 15, 30, 50]  # Percentages for Win Path
-CASE2 = [10, 25, 65]          # Percentages for Loss Path
+CASE1 = [10, 10, 15, 30, 50]
+CASE2 = [10, 25, 65]
 
 def start_game_flow(update: Update, context: CallbackContext):
     context.user_data.clear()
+    keyboard = [["10x", "100x"], ["1000x", "10000x"]]
     update.message.reply_text(
-        "🎮 Game Started!\n\nPlease enter your Current Balance (e.g., 1000).",
-        parse_mode=ParseMode.MARKDOWN
+        "Game Started.\n\nPlease enter your Current Balance (e.g., 1000).",
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True, input_field_placeholder="Enter balance")
     )
 
 def start_game(update: Update, context: CallbackContext):
@@ -127,30 +130,38 @@ def process_balance(update: Update, context: CallbackContext):
     if reject_if_banned(update, context):
         return
 
-    try:
-        balance = float(update.message.text)
-    except Exception:
-        return update.message.reply_text("Please enter a valid number (e.g., 1000).")
+    text = update.message.text.strip().lower()
+    if text.endswith("x"):
+        try:
+            multiplier = int(text.replace("x", ""))
+            base = 10
+            balance = nearest_ten(base * multiplier)
+        except ValueError:
+            return update.message.reply_text("Please enter a valid number (e.g., 1000).")
+    else:
+        try:
+            balance = float(text)
+        except Exception:
+            return update.message.reply_text("Please enter a valid number (e.g., 1000).")
 
     balance = nearest_ten(balance)
     context.user_data["BaseBalance"] = balance
     context.user_data["Round"] = 1
-    context.user_data["Path"] = None  # Will be set after first round
+    context.user_data["Path"] = None
+    context.user_data["Wins"] = 0
+    context.user_data["Losses"] = 0
+    context.user_data["TotalPlaced"] = 0
+    context.user_data["Profit"] = 0
+
+    update.message.reply_text("Balance saved. Let's begin!", reply_markup=ReplyKeyboardRemove())
 
     investment = percent_of(balance, CASE1[0])
-    buttons = [[
-        InlineKeyboardButton("Win", callback_data="r1_win"),
-        InlineKeyboardButton("Lose", callback_data="r1_lose")
-    ]]
-    update.message.reply_text(
-        f"Round 1: Place ₹{investment} (10% of ₹{balance}) on predicted color.\n\nRound 1 result?",
-        reply_markup=InlineKeyboardMarkup(buttons),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-# =============================
-# UPDATED HANDLE_RESULT (with Session Summary)
-# =============================
+    context.user_data["TotalPlaced"] += investment
+    update.message.reply_text(f"Round 1: Place ₹{investment} (10% of ₹{balance}).")
+    buttons = [
+        [InlineKeyboardButton("Win", callback_data="r1_win"), InlineKeyboardButton("Lose", callback_data="r1_lose")]
+    ]
+    update.message.reply_text("Round 1 result?", reply_markup=InlineKeyboardMarkup(buttons))
 
 def handle_result(update: Update, context: CallbackContext):
     if reject_if_banned(update, context):
@@ -163,68 +174,72 @@ def handle_result(update: Update, context: CallbackContext):
     base_balance = context.user_data.get("BaseBalance", 0)
     round_num = context.user_data.get("Round", 1)
     path = context.user_data.get("Path")
+    total_placed = context.user_data.get("TotalPlaced", 0)
+    profit = context.user_data.get("Profit", 0)
+    wins = context.user_data.get("Wins", 0)
+    losses = context.user_data.get("Losses", 0)
 
     if round_num == 1:
-        if data.endswith("_win"):
-            path = "case1"
-        else:
-            path = "case2"
+        path = "case1" if data.endswith("_win") else "case2"
         context.user_data["Path"] = path
 
     percentages = CASE1 if path == "case1" else CASE2
     total_rounds = len(percentages)
 
-    # ✅ End on WIN (after Round 1)
+    if data.endswith("_win"):
+        wins += 1
+        context.user_data["Wins"] = wins
+        profit += percent_of(base_balance, percentages[round_num - 1])
+        context.user_data["Profit"] = profit
+    else:
+        losses += 1
+        context.user_data["Losses"] = losses
+        profit -= percent_of(base_balance, percentages[round_num - 1])
+        context.user_data["Profit"] = profit
+
+    # End on WIN (after Round 1)
     if data.endswith("_win") and round_num > 1:
+        updated_balance = base_balance + profit
         msg = (
-            f"🎉 Congratulations! You won in Round {round_num}!\n\n"
-            f"📊 Session Summary:\n"
-            f"- Total Rounds Played: {round_num}\n"
-            f"- Final Result: WIN\n"
-            f"- Base Balance: ₹{base_balance}\n\n"
+            f"Congratulations! You won in Round {round_num}!\n\n"
+            f"Session Summary:\n"
+            f"- Total Rounds Played: {round_num} ({wins} Won, {losses} Lost)\n"
+            f"- Total Amount Placed: ₹{total_placed}\n"
+            f"- Total Profit Made: ₹{profit}\n"
+            f"- Updated Balance: ₹{updated_balance}\n\n"
             f"Use /start to begin a new prediction session."
         )
-        query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN)
+        query.message.reply_text(msg)
         context.user_data.clear()
         return
 
-    # ✅ End if all rounds exhausted
     if round_num >= total_rounds:
+        updated_balance = base_balance + profit
         msg = (
-            f"🛑 Prediction session completed.\n\n"
-            f"📊 Session Summary:\n"
-            f"- Total Rounds Played: {round_num}\n"
-            f"- Final Result: LOSS\n"
-            f"- Base Balance: ₹{base_balance}\n\n"
+            f"Prediction session completed.\n\n"
+            f"Session Summary:\n"
+            f"- Total Rounds Played: {round_num} ({wins} Won, {losses} Lost)\n"
+            f"- Total Amount Placed: ₹{total_placed}\n"
+            f"- Total Profit Made: ₹{profit}\n"
+            f"- Updated Balance: ₹{updated_balance}\n\n"
             f"Use /start to begin a new session."
         )
-        query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN)
+        query.message.reply_text(msg)
         context.user_data.clear()
         return
 
-    # Proceed to next round
     next_round = round_num + 1
     context.user_data["Round"] = next_round
     next_percent = percentages[next_round - 1]
     invest_amount = percent_of(base_balance, next_percent)
+    context.user_data["TotalPlaced"] += invest_amount
 
-    buttons = [[
-        InlineKeyboardButton("Win", callback_data=f"r{next_round}_win"),
-        InlineKeyboardButton("Lose", callback_data=f"r{next_round}_lose")
-    ]]
-
-    msg = (
-        f"{'✅' if data.endswith('_win') else '❌'} Round {round_num} {'WIN' if data.endswith('_win') else 'LOSS'}\n"
-        f"Base Balance: ₹{base_balance}\n\n"
-        f"Round {next_round}: Place ₹{invest_amount} ({next_percent}% of ₹{base_balance})\n\n"
-        f"Round {next_round} result?"
-    )
-
-    query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.MARKDOWN)
-
-# =============================
-# OTHER COMMANDS
-# =============================
+    query.message.reply_text(f"Round {next_round}: Place ₹{invest_amount} ({next_percent}% of ₹{base_balance}).")
+    buttons = [
+        [InlineKeyboardButton("Win", callback_data=f"r{next_round}_win"),
+         InlineKeyboardButton("Lose", callback_data=f"r{next_round}_lose")]
+    ]
+    query.message.reply_text(f"Round {next_round} result?", reply_markup=InlineKeyboardMarkup(buttons))
 
 def clear(update: Update, context: CallbackContext):
     if reject_if_banned(update, context):
