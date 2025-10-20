@@ -127,10 +127,21 @@ def is_effectively_active(update: Update, context: CallbackContext) -> bool:
 
 def start_game_flow(update: Update, context: CallbackContext):
     context.user_data.clear()
-    keyboard = [["10x", "100x"], ["1000x", "10000x"]]
+    keyboard = [
+        ["1", "2", "3", "10"],
+        ["4", "5", "6", "100"],
+        ["7", "8", "9", "1K"],
+        ["0", "10K"]
+    ]
     update.message.reply_text(
-        "Game Started.\n\nPlease enter your Current Balance (e.g., 1000).",
-        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True, input_field_placeholder="Enter balance")
+        "🎮 Game Started!\n\nPlease enter your Current Balance.\n"
+        "You can type manually or use the number pad below 👇",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard,
+            one_time_keyboard=True,
+            resize_keyboard=True,
+            input_field_placeholder="Enter or tap digits"
+        )
     )
 
 def start_game(update: Update, context: CallbackContext):
@@ -145,19 +156,26 @@ def process_balance(update: Update, context: CallbackContext):
         return
 
     user = update.effective_user
-    text = update.message.text.strip().lower()
-    if text.endswith("x"):
+    text = update.message.text.strip().upper()
+
+    # Convert shorthand like 1K = 1000, 10K = 10000
+    if text.endswith("K"):
         try:
-            multiplier = int(text.replace("x", ""))
-            base = 10
-            balance = nearest_ten(base * multiplier)
-        except ValueError:
-            return update.message.reply_text("Please enter a valid number (e.g., 1000).")
-    else:
-        try:
-            balance = float(text)
+            num = float(text[:-1])
+            text = str(int(num * 1000))
         except Exception:
-            return update.message.reply_text("Please enter a valid number (e.g., 1000).")
+            update.message.reply_text("Please enter a valid number (e.g., 1000).")
+            return
+
+    # Check numeric validity
+    if not text.replace('.', '', 1).isdigit():
+        update.message.reply_text("Please enter a valid numeric balance (e.g., 1000).")
+        return
+
+    try:
+        balance = float(text)
+    except Exception:
+        return update.message.reply_text("Please enter a valid number (e.g., 1000).")
 
     balance = nearest_ten(balance)
     log_event("BALANCE", user, f"Entered balance: ₹{balance}")
@@ -261,7 +279,32 @@ def handle_result(update: Update, context: CallbackContext):
     query.message.reply_text(f"Round {next_round} result?", reply_markup=InlineKeyboardMarkup(buttons))
 
 # =============================
-# OTHER COMMANDS (with logs)
+# ADMIN LOG VIEW (/logs)
+# =============================
+
+def logs_cmd(update: Update, context: CallbackContext):
+    user = update.effective_user
+    if not _is_admin(user.id):
+        update.message.reply_text("You are not authorized to view logs.")
+        return
+    try:
+        with open("bot.log", "r", encoding="utf-8") as f:
+            lines = f.readlines()[-30:]
+        if not lines:
+            update.message.reply_text("No logs found.")
+            return
+        log_text = "".join(lines[-30:])
+        if len(log_text) > 3900:
+            log_text = log_text[-3900:]
+        update.message.reply_text(
+            "🧾 *Last 30 Log Entries:*\n\n```\n" + log_text + "\n```",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        update.message.reply_text(f"Error reading logs: {e}")
+
+# =============================
+# OTHER COMMANDS
 # =============================
 
 def clear(update: Update, context: CallbackContext):
@@ -292,7 +335,8 @@ def commands_list(update: Update, context: CallbackContext):
         "/rules – Show rules\n"
         "/commands – List commands\n"
         "/override – Enable session override (if allowed)\n"
-        "/reboot – Logout and start fresh"
+        "/reboot – Logout and start fresh\n"
+        "/logs – Show recent activity logs (Admin only)"
     )
     update.message.reply_text(cmds, parse_mode=ParseMode.MARKDOWN)
 
@@ -342,6 +386,7 @@ def main():
     dp.add_handler(CommandHandler("commands", commands_list))
     dp.add_handler(CommandHandler("override", override_cmd))
     dp.add_handler(CommandHandler("reboot", reboot))
+    dp.add_handler(CommandHandler("logs", logs_cmd))
     dp.add_handler(CallbackQueryHandler(handle_result))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, process_balance))
     dp.add_handler(MessageHandler(Filters.command, unknown))
