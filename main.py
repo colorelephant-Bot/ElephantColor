@@ -26,21 +26,32 @@ import pytz
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = os.environ.get("ADMIN_ID")
-RENDER_URL = os.environ.get("RENDER_URL")  # e.g. https://color-elephant.onrender.com
+RENDER_URL = os.environ.get("RENDER_URL")  # Example: https://color-elephant.onrender.com
 TIMEZONE = pytz.timezone("Asia/Kolkata")
 RULES_FILE = "rules.txt"
 BANNED_FILE = "banned_users.txt"
 
 CASE1 = [10, 10, 15, 30, 50]
 CASE2 = [10, 25, 65]
-TAX_RATE = 0.10  # 10% tax on profit amount
+TAX_RATE = 0.10  # 10% tax on profit
+
+# =============================
+# LOGGING SETUP
+# =============================
 
 logging.basicConfig(
     handlers=[logging.StreamHandler(), logging.FileHandler("bot.log", mode="a", encoding="utf-8")],
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+def log_event(event_type, user, message):
+    """Log formatted events for better tracking"""
+    name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+    username = f"@{user.username}" if user.username else "NoUsername"
+    uid = user.id if user else "Unknown"
+    logger.info(f"[{event_type}] {message} | User: {username} ({uid}) - {name}")
 
 # =============================
 # FLASK APP (Webhook + Ping)
@@ -84,7 +95,7 @@ def is_banned(user_id):
 def reject_if_banned(update: Update, context: CallbackContext):
     user = update.effective_user
     if user and is_banned(user.id):
-        logger.info(f"Banned user {user.id}, trying to access.")
+        logger.info(f"[BLOCKED] Banned user {user.id}, trying to access.")
         return True
     return False
 
@@ -125,12 +136,15 @@ def start_game_flow(update: Update, context: CallbackContext):
 def start_game(update: Update, context: CallbackContext):
     if reject_if_banned(update, context):
         return
+    user = update.effective_user
+    log_event("COMMAND", user, "/start invoked")
     start_game_flow(update, context)
 
 def process_balance(update: Update, context: CallbackContext):
     if reject_if_banned(update, context):
         return
 
+    user = update.effective_user
     text = update.message.text.strip().lower()
     if text.endswith("x"):
         try:
@@ -146,6 +160,8 @@ def process_balance(update: Update, context: CallbackContext):
             return update.message.reply_text("Please enter a valid number (e.g., 1000).")
 
     balance = nearest_ten(balance)
+    log_event("BALANCE", user, f"Entered balance: ₹{balance}")
+
     context.user_data["BaseBalance"] = balance
     context.user_data["Round"] = 1
     context.user_data["Path"] = None
@@ -165,7 +181,7 @@ def process_balance(update: Update, context: CallbackContext):
     update.message.reply_text("Round 1 result?", reply_markup=InlineKeyboardMarkup(buttons))
 
 # =============================
-# UPDATED HANDLE_RESULT (with Tax & Summary)
+# HANDLE RESULT (Tax + Logging)
 # =============================
 
 def handle_result(update: Update, context: CallbackContext):
@@ -175,6 +191,7 @@ def handle_result(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
     data = query.data
+    user = update.effective_user
 
     base_balance = context.user_data.get("BaseBalance", 0)
     round_num = context.user_data.get("Round", 1)
@@ -183,6 +200,9 @@ def handle_result(update: Update, context: CallbackContext):
     profit = context.user_data.get("Profit", 0)
     wins = context.user_data.get("Wins", 0)
     losses = context.user_data.get("Losses", 0)
+
+    result_text = "Win" if data.endswith("_win") else "Lose"
+    log_event("ROUND", user, f"Round {round_num} result: {result_text}")
 
     if round_num == 1:
         path = "case1" if data.endswith("_win") else "case2"
@@ -197,7 +217,7 @@ def handle_result(update: Update, context: CallbackContext):
     if data.endswith("_win"):
         wins += 1
         context.user_data["Wins"] = wins
-        gross_profit = investment  # user earns profit equal to invested amount
+        gross_profit = investment
         tax = gross_profit * TAX_RATE
         net_profit = gross_profit - tax
         profit += net_profit
@@ -208,30 +228,11 @@ def handle_result(update: Update, context: CallbackContext):
         profit -= investment
         context.user_data["Profit"] = nearest_ten(profit)
 
-    # --- End on WIN (after Round 1) ---
-    if data.endswith("_win") and round_num > 1:
+    # --- End conditions ---
+    if data.endswith("_win") and round_num > 1 or round_num >= total_rounds:
         profit_after_tax = nearest_ten(profit)
         updated_balance = nearest_ten(base_balance + profit_after_tax)
         msg = (
-            f"Congratulations! You won in Round {round_num}!\n\n"
-            f"Session Summary:\n"
-            f"Rounds Played: {round_num} ({wins} Won, {losses} Lost)\n"
-            f"Amount Placed: ₹{context.user_data['TotalPlaced']}\n"
-            f"Profit Made: ₹{nearest_ten(profit)}\n"
-            f"Profit After Tax: ₹{nearest_ten(profit_after_tax)}\n"
-            f"Balance After Session: ₹{nearest_ten(updated_balance)}\n\n"
-            f"Use /start to begin a new prediction session."
-        )
-        query.message.reply_text(msg)
-        context.user_data.clear()
-        return
-
-    # --- End if all rounds exhausted ---
-    if round_num >= total_rounds:
-        profit_after_tax = nearest_ten(profit)
-        updated_balance = nearest_ten(base_balance + profit_after_tax)
-        msg = (
-            f"Prediction session completed.\n\n"
             f"Session Summary:\n"
             f"Rounds Played: {round_num} ({wins} Won, {losses} Lost)\n"
             f"Amount Placed: ₹{context.user_data['TotalPlaced']}\n"
@@ -241,10 +242,11 @@ def handle_result(update: Update, context: CallbackContext):
             f"Use /start to begin a new session."
         )
         query.message.reply_text(msg)
+        log_event("SUMMARY", user, f"Profit ₹{profit_after_tax} | Balance ₹{updated_balance}")
         context.user_data.clear()
         return
 
-    # --- Proceed to next round ---
+    # --- Next Round ---
     next_round = round_num + 1
     context.user_data["Round"] = next_round
     next_percent = percentages[next_round - 1]
@@ -259,24 +261,30 @@ def handle_result(update: Update, context: CallbackContext):
     query.message.reply_text(f"Round {next_round} result?", reply_markup=InlineKeyboardMarkup(buttons))
 
 # =============================
-# OTHER COMMANDS
+# OTHER COMMANDS (with logs)
 # =============================
 
 def clear(update: Update, context: CallbackContext):
     if reject_if_banned(update, context):
         return
+    user = update.effective_user
+    log_event("COMMAND", user, "/clear invoked")
     context.user_data.clear()
     update.message.reply_text("Chat cleared. Use /start to start again.")
 
 def rules(update: Update, context: CallbackContext):
     if reject_if_banned(update, context):
         return
+    user = update.effective_user
+    log_event("COMMAND", user, "/rules invoked")
     rules_text = load_rules()
     update.message.reply_text(f"Platform Rules:\n\n{rules_text}", parse_mode=ParseMode.MARKDOWN)
 
 def commands_list(update: Update, context: CallbackContext):
     if reject_if_banned(update, context):
         return
+    user = update.effective_user
+    log_event("COMMAND", user, "/commands invoked")
     cmds = (
         "Available Commands:\n\n"
         "/start – Start predictions\n"
@@ -288,15 +296,11 @@ def commands_list(update: Update, context: CallbackContext):
     )
     update.message.reply_text(cmds, parse_mode=ParseMode.MARKDOWN)
 
-def unknown(update: Update, context: CallbackContext):
-    if reject_if_banned(update, context):
-        return
-    update.message.reply_text("Sorry, I am not programmed to answer this. Try /start or /commands.")
-
 def override_cmd(update: Update, context: CallbackContext):
     if reject_if_banned(update, context):
         return
     user = update.effective_user
+    log_event("COMMAND", user, "/override invoked")
     awaiting = context.user_data.get("awaiting_override", False)
     if not awaiting:
         update.message.reply_text("You can only use /override after the bot offered it.")
@@ -312,11 +316,20 @@ def override_cmd(update: Update, context: CallbackContext):
 def reboot(update: Update, context: CallbackContext):
     if reject_if_banned(update, context):
         return
+    user = update.effective_user
+    log_event("COMMAND", user, "/reboot invoked")
     context.user_data.clear()
     update.message.reply_text("Bot rebooted. Session cleared.\n\nUse /start to begin again.")
 
+def unknown(update: Update, context: CallbackContext):
+    if reject_if_banned(update, context):
+        return
+    user = update.effective_user
+    log_event("UNKNOWN", user, f"Sent unknown command: {update.message.text}")
+    update.message.reply_text("Sorry, I am not programmed to answer this. Try /start or /commands.")
+
 # =============================
-# MAIN BOT LAUNCH (WEBHOOK)
+# MAIN BOT LAUNCH
 # =============================
 
 def main():
