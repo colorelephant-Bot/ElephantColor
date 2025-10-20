@@ -214,7 +214,10 @@ def handle_result(update: Update, context: CallbackContext):
         query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN)
         context.user_data.clear()
         return
-
+        
+def clear(update: Update, context: CallbackContext):
+    if reject_if_banned(update, context):
+        
     # Proceed to next round
     next_round = round_num + 1
     context.user_data["Round"] = next_round
