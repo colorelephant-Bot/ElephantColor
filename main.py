@@ -3,7 +3,7 @@ import logging
 from datetime import datetime
 import pytz
 from math import floor
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from threading import Thread
 from telegram import (
     Update,
@@ -26,6 +26,7 @@ from telegram.ext import (
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = os.environ.get("ADMIN_ID")
+RENDER_URL = os.environ.get("RENDER_URL")  # e.g. https://color-elephant.onrender.com
 TIMEZONE = pytz.timezone("Asia/Kolkata")
 RULES_FILE = "rules.txt"
 BANNED_FILE = "banned_users.txt"
@@ -38,7 +39,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =============================
-# KEEP ALIVE (Flask server + UptimeRobot)
+# FLASK APP (Webhook + Ping)
 # =============================
 
 app = Flask('')
@@ -52,12 +53,6 @@ def home():
 def ping():
     logger.info("[PING] /ping endpoint accessed.")
     return jsonify(status="ok", message="Ping received. Bot alive."), 200
-
-def keep_alive():
-    def run():
-        app.run(host='0.0.0.0', port=8080)
-    t = Thread(target=run)
-    t.start()
 
 # =============================
 # BAN SYSTEM
@@ -110,50 +105,6 @@ def reject_if_banned(update: Update, context: CallbackContext):
         return True
     return False
 
-def resolve_username_to_id(bot, username):
-    u = username.lstrip('@')
-    try:
-        chat = bot.get_chat(u)
-        return chat.id
-    except Exception:
-        return None
-
-def ban_cmd(update: Update, context: CallbackContext):
-    if not ADMIN_ID or str(update.effective_user.id) != str(ADMIN_ID):
-        return
-    if not context.args:
-        update.message.reply_text("Usage: /ban <user_id|@username>")
-        return
-    target = context.args[0]
-    target_id = None
-    if target.isdigit() or (target.startswith('-') and target[1:].isdigit()):
-        target_id = int(target)
-    else:
-        target_id = resolve_username_to_id(context.bot, target)
-    if not target_id:
-        update.message.reply_text("Could not resolve user.")
-        return
-    ban_user_by_id(target_id, update.effective_user.id)
-    update.message.reply_text(f"User {target_id} has been banned.")
-
-def unban_cmd(update: Update, context: CallbackContext):
-    if not ADMIN_ID or str(update.effective_user.id) != str(ADMIN_ID):
-        return
-    if not context.args:
-        update.message.reply_text("Usage: /unban <user_id|@username>")
-        return
-    target = context.args[0]
-    target_id = None
-    if target.isdigit() or (target.startswith('-') and target[1:].isdigit()):
-        target_id = int(target)
-    else:
-        target_id = resolve_username_to_id(context.bot, target)
-    if not target_id:
-        update.message.reply_text("Could not resolve user.")
-        return
-    unban_user_by_id(target_id, update.effective_user.id)
-    update.message.reply_text(f"User {target_id} has been unbanned.")
-
 # =============================
 # HELPER FUNCTIONS
 # =============================
@@ -177,15 +128,6 @@ def _is_admin(user_id):
 
 def is_effectively_active(update: Update, context: CallbackContext) -> bool:
     return True  # Always active 24/7
-
-def inactive_reply(update: Update, context: CallbackContext):
-    msg = (
-        "The bot is currently offline.\n\n"
-        "It will be active at 1 PM, 5 PM, and 9 PM.\n\n"
-        "If you wish to continue now, reply with /override (if permitted)."
-    )
-    context.user_data["awaiting_override"] = True
-    update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 # =============================
 # GAME LOGIC
@@ -215,7 +157,8 @@ def process_balance(update: Update, context: CallbackContext):
     context.user_data["Balance"] = balance
     investment = percent_of(balance, 0.10)
     context.user_data["Round 1"] = investment
-    buttons = [[InlineKeyboardButton("Win", callback_data="r1_win"), InlineKeyboardButton("Lose", callback_data="r1_lose")]]
+    buttons = [[InlineKeyboardButton("Win", callback_data="r1_win"),
+                InlineKeyboardButton("Lose", callback_data="r1_lose")]]
     update.message.reply_text(
         f"Round 1: Place ₹{investment} (10% of ₹{balance}) on predicted color.\n\nRound 1 result?",
         parse_mode=ParseMode.MARKDOWN,
@@ -249,7 +192,8 @@ def handle_result(update: Update, context: CallbackContext):
         msg += "💀 Balance exhausted. Game over.\n\nUse /start to restart."
         query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN)
         return
-    buttons = [[InlineKeyboardButton("Win", callback_data=f"r{round_num + 1}_win"), InlineKeyboardButton("Lose", callback_data=f"r{round_num + 1}_lose")]]
+    buttons = [[InlineKeyboardButton("Win", callback_data=f"r{round_num + 1}_win"),
+                InlineKeyboardButton("Lose", callback_data=f"r{round_num + 1}_lose")]]
     msg += f"Round {round_num + 1}: Place ₹{next_investment} (10% of ₹{balance}) on predicted color.\n\nRound {round_num + 1} result?"
     query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -307,15 +251,13 @@ def reboot(update: Update, context: CallbackContext):
     update.message.reply_text("Bot rebooted. Session cleared.\n\nUse /start to begin again.")
 
 # =============================
-# MAIN BOT LAUNCH
+# MAIN BOT LAUNCH (WEBHOOK)
 # =============================
 
 def main():
-    keep_alive()
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
-    dp.add_handler(CommandHandler("ban", ban_cmd))
-    dp.add_handler(CommandHandler("unban", unban_cmd))
+
     dp.add_handler(CommandHandler("start", start_game))
     dp.add_handler(CommandHandler("clear", clear))
     dp.add_handler(CommandHandler("rules", rules))
@@ -325,9 +267,21 @@ def main():
     dp.add_handler(CallbackQueryHandler(handle_result))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, process_balance))
     dp.add_handler(MessageHandler(Filters.command, unknown))
-    updater.start_polling()
-    logger.info("✅ Bot is live and monitored via Flask + UptimeRobot.")
-    updater.idle()
+
+    # Flask route for Telegram webhook
+    @app.route(f"/{BOT_TOKEN}", methods=["POST"])
+    def webhook():
+        update = Update.de_json(request.get_json(force=True), updater.bot)
+        dp.process_update(update)
+        return "ok", 200
+
+    # Set webhook automatically using Render URL
+    updater.bot.delete_webhook()
+    updater.bot.set_webhook(f"{RENDER_URL}/{BOT_TOKEN}")
+    logger.info(f"✅ Webhook set to {RENDER_URL}/{BOT_TOKEN}")
+
+    # Start Flask server
+    app.run(host="0.0.0.0", port=8080)
 
 if __name__ == "__main__":
     main()
