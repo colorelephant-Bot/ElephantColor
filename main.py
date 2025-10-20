@@ -27,12 +27,13 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = os.environ.get("ADMIN_ID")
 TIMEZONE = pytz.timezone("Asia/Kolkata")
-ACTIVE_HOURS = [13, 17, 21]
 RULES_FILE = "rules.txt"
 BANNED_FILE = "banned_users.txt"
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    handlers=[logging.StreamHandler(), logging.FileHandler("bot.log", mode="a", encoding="utf-8")],
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
@@ -175,10 +176,7 @@ def _is_admin(user_id):
     return str(user_id) == str(ADMIN_ID)
 
 def is_effectively_active(update: Update, context: CallbackContext) -> bool:
-    if context.user_data.get("override_session", False):
-        return True
-    now = datetime.now(TIMEZONE)
-    return now.hour in ACTIVE_HOURS
+    return True  # Always active 24/7
 
 def inactive_reply(update: Update, context: CallbackContext):
     msg = (
@@ -203,16 +201,12 @@ def start_game_flow(update: Update, context: CallbackContext):
 def start_game(update: Update, context: CallbackContext):
     if reject_if_banned(update, context):
         return
-    if not is_effectively_active(update, context):
-        return inactive_reply(update, context)
     context.user_data.clear()
     start_game_flow(update, context)
 
 def process_balance(update: Update, context: CallbackContext):
     if reject_if_banned(update, context):
         return
-    if not is_effectively_active(update, context):
-        return inactive_reply(update, context)
     try:
         balance = float(update.message.text)
     except Exception:
@@ -235,7 +229,29 @@ def handle_result(update: Update, context: CallbackContext):
     query.answer()
     data = query.data
     balance = context.user_data.get("Balance", 0)
-    # (rest of handle_result logic unchanged)
+    round_num = context.user_data.get("Round", 1)
+    investment = context.user_data.get(f"Round {round_num}", 0)
+    if data.endswith("_win"):
+        balance += investment
+        msg = f"✅ Round {round_num} WIN!\nNew Balance: ₹{balance}\n\n"
+    elif data.endswith("_lose"):
+        balance -= investment
+        msg = f"❌ Round {round_num} LOSS!\nNew Balance: ₹{balance}\n\n"
+    else:
+        msg = "Invalid response."
+        query.edit_message_text(msg)
+        return
+    context.user_data["Balance"] = nearest_ten(balance)
+    context.user_data["Round"] = round_num + 1
+    next_investment = percent_of(balance, 0.10)
+    context.user_data[f"Round {round_num + 1}"] = next_investment
+    if balance <= 0:
+        msg += "💀 Balance exhausted. Game over.\n\nUse /start to restart."
+        query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN)
+        return
+    buttons = [[InlineKeyboardButton("Win", callback_data=f"r{round_num + 1}_win"), InlineKeyboardButton("Lose", callback_data=f"r{round_num + 1}_lose")]]
+    msg += f"Round {round_num + 1}: Place ₹{next_investment} (10% of ₹{balance}) on predicted color.\n\nRound {round_num + 1} result?"
+    query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
 
 def clear(update: Update, context: CallbackContext):
     if reject_if_banned(update, context):
