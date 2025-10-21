@@ -201,15 +201,39 @@ def start_game_flow(update: Update, context: CallbackContext):
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False),
     )
 
-def reset_cmd(update: Update, context: CallbackContext):
+def reset(update: Update, context: CallbackContext):
     user = update.effective_user
+    chat_id = update.effective_chat.id
     log_event("COMMAND", user, "/reset invoked")
-    context.user_data.clear()
+
+    sent_messages = context.user_data.get("sent_messages", [])
+    deleted_count = 0
+
+    # Try deleting all stored bot messages for this chat
+    for mid in sent_messages:
+        try:
+            context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            deleted_count += 1
+        except Exception:
+            continue
+
+    # Delete the user's command message too (optional, cleaner)
     try:
-        # remove custom keyboard
-        update.message.reply_text("Session cleared. Use /start to begin a new session.", reply_markup=ReplyKeyboardRemove())
+        context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
     except Exception:
-        update.message.reply_text("Session cleared. Use /start to begin a new session.")
+        pass
+
+    # Clear all session data
+    context.user_data.clear()
+    context.chat_data.clear()
+
+    # Log and confirm
+    log_event("SYSTEM", user, f"Session reset. Deleted {deleted_count} messages.")
+    update.message.reply_text(
+        f"♻️ Session cleared. {deleted_count} previous messages deleted.\n"
+        "You can start a new one anytime with /start."
+    )
+
 
 def process_balance(update: Update, context: CallbackContext):
     """
