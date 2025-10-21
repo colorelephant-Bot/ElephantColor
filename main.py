@@ -1,24 +1,30 @@
 # main.py
-# -----------------------------------------------------------------------------
-# COLOR ELEPHANT BOT - main.py
-# Final production-ready version (per user requirements)
+# Color Elephant Bot - Final production version
+# Features:
+# - Permanent logging with daily rotation (logs/), auto-clean after 1 day
+# - Interactive buffered inline number pad (digits + multipliers + Enter + Clear)
+# - /start with original game logic (rounds, %s, tax), session summary
+# - /estimate with worst-case compounding (3 sessions/day), day buttons 10/20/30/60/90
+# - /reset deletes tracked bot messages in that chat and clears session
+# - Creator panel (/roka) with /down, /restart, /reboot, /status, /logs
+# - Maintenance mode persisted (system_state.json)
+# - Flask webhook for Render (/ping)
+# - Creates missing files/folders automatically
 # -----------------------------------------------------------------------------
 
-# ------------------------------
-# IMPORTS & CONFIG
-# ------------------------------
 import os
-import logging
+import json
+import time
+from datetime import datetime, timedelta
 from math import floor
-from datetime import datetime, date
 import pytz
+import logging
+from logging.handlers import RotatingFileHandler
 from flask import Flask, jsonify, request
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     ParseMode,
 )
 from telegram.ext import (
@@ -29,106 +35,127 @@ from telegram.ext import (
     CallbackQueryHandler,
     CallbackContext,
 )
+import traceback
 
-# =============================
-# 🔒 LOGGING SYSTEM (PERMANENT SECTION — DO NOT MODIFY)
-# =============================
-# This section is intentionally self-contained and should remain unchanged.
-# It provides structured logging to console + file with categories:
-# [SYSTEM], [USERS], [COMMAND], [GAME], [SUMMARY], [CREATOR]
-LOG_FILE = "bot.log"
-
-def setup_logging():
-    fmt = "%(asctime)s [%(levelname)s] %(message)s"
-    logger = logging.getLogger("ColorElephantBot")
-    logger.setLevel(logging.INFO)
-
-    # Avoid adding duplicate handlers if module reloaded
-    if not logger.handlers:
-        fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
-        fh.setLevel(logging.INFO)
-        fh.setFormatter(logging.Formatter(fmt))
-        ch = logging.StreamHandler()
-        ch.setLevel(logging.INFO)
-        ch.setFormatter(logging.Formatter(fmt))
-        logger.addHandler(fh)
-        logger.addHandler(ch)
-    return logger
-
-logger = setup_logging()
-
-def log_event(category: str, user=None, details: str = ""):
-    """
-    Unified logging function.
-    category: one of SYSTEM, USERS, COMMAND, GAME, SUMMARY, CREATOR
-    user: Telegram user object (or None)
-    details: descriptive string
-    """
-    uname = "Unknown"
-    uid = "N/A"
-    if user:
-        uname = getattr(user, "username", None) or f"{getattr(user, 'first_name', '')}".strip() or "NoUsername"
-        uid = getattr(user, "id", "N/A")
-    message = f"[{category}] {details} | User: @{uname} ({uid})"
-    # Route by category
-    if category.upper() == "SYSTEM":
-        logger.info(message)
-    elif category.upper() == "USERS":
-        logger.info(message)
-    elif category.upper() == "COMMAND":
-        logger.info(message)
-    elif category.upper() == "GAME":
-        logger.info(message)
-    elif category.upper() == "SUMMARY":
-        logger.info(message)
-    elif category.upper() == "CREATOR":
-        logger.info(message)
-    else:
-        logger.info(f"[OTHER] {details} | User: @{uname} ({uid})")
-
-# End of logging section
-# =============================
-
-# ------------------------------
-# Constants & Environment
-# ------------------------------
+# ---------------------------
+# CONFIG
+# ---------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CREATOR_ID = int(os.environ.get("CREATOR_ID")) if os.environ.get("CREATOR_ID") else None
 RENDER_URL = os.environ.get("RENDER_URL")  # e.g. https://your-app.onrender.com
-
 TIMEZONE = pytz.timezone("Asia/Kolkata")
-RULES_FILE = "rules.txt"
-USERS_FILE = "users.txt"
 
-# Game configuration (unchanged logic)
+LOGS_DIR = "logs"
+SYSTEM_STATE_FILE = "system_state.json"
+RULES_FILE = "rules.txt"
+
 CASE1 = [10, 10, 15, 30, 50]
 CASE2 = [10, 25, 65]
-TAX_RATE = 0.10  # 10% tax on profit
+TAX_RATE = 0.10  # 10%
 
-# Ensure essential files exist
-for fname in (RULES_FILE, USERS_FILE, LOG_FILE):
-    if not os.path.exists(fname):
-        with open(fname, "w", encoding="utf-8") as f:
-            f.write("")
+# ---------------------------
+# BOOTSTRAP - ensure files/dirs exist
+# ---------------------------
+os.makedirs(LOGS_DIR, exist_ok=True)
+if not os.path.exists(RULES_FILE):
+    with open(RULES_FILE, "w", encoding="utf-8") as f:
+        f.write("Platform rules not defined yet.\n")
+if not os.path.exists(SYSTEM_STATE_FILE):
+    with open(SYSTEM_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump({"maintenance": False, "last_reboot": None, "uptime_start": datetime.now().isoformat()}, f)
 
-# ------------------------------
-# FLASK APP (for Render webhook + UptimeRobot)
-# ------------------------------
+# ---------------------------
+# LOGGING (daily file in logs/)
+# Remove older logs > 1 day
+# ---------------------------
+def _cleanup_old_logs():
+    try:
+        now = datetime.now()
+        for fname in os.listdir(LOGS_DIR):
+            if fname.startswith("bot_") and fname.endswith(".log"):
+                path = os.path.join(LOGS_DIR, fname)
+                try:
+                    # file name format bot_YYYY-MM-DD.log
+                    date_part = fname[4:-4]
+                    file_date = datetime.strptime(date_part, "%Y-%m-%d")
+                    if (now - file_date).total_seconds() > 86400:  # older than 1 day
+                        os.remove(path)
+                except Exception:
+                    # fallback: check mtime
+                    mtime = datetime.fromtimestamp(os.path.getmtime(path))
+                    if (now - mtime).total_seconds() > 86400:
+                        os.remove(path)
+    except Exception:
+        pass
+
+_cleanup_old_logs()
+
+TODAY = datetime.now().strftime("%Y-%m-%d")
+LOG_PATH = os.path.join(LOGS_DIR, f"bot_{TODAY}.log")
+
+logger = logging.getLogger("ColorElephantBot")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    fh = RotatingFileHandler(LOG_PATH, maxBytes=5*1024*1024, backupCount=2, encoding="utf-8")
+    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    ch = logging.StreamHandler()
+    ch.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+
+def log_event(category: str, user=None, details: str = ""):
+    uname = "NoUsername"
+    uid = "N/A"
+    if user:
+        try:
+            uname = getattr(user, "username", None) or getattr(user, "first_name", "") or "NoUsername"
+            uid = getattr(user, "id", "N/A")
+        except Exception:
+            pass
+    msg = f"[{category}] {details} | User: @{uname} ({uid})"
+    logger.info(msg)
+
+# ---------------------------
+# Flask app for webhook / ping
+# ---------------------------
 app = Flask(__name__)
 
 @app.route("/")
 def root():
-    log_event("SYSTEM", None, "Root endpoint hit.")
-    return "ColorElephant Bot is running."
+    log_event("SYSTEM", None, "Root endpoint hit")
+    return "Color Elephant Bot is running."
 
 @app.route("/ping")
 def ping():
-    log_event("SYSTEM", None, "/ping received.")
+    log_event("SYSTEM", None, "/ping received")
     return jsonify(status="ok", message="Ping received. Bot alive."), 200
 
-# ------------------------------
-# Utilities
-# ------------------------------
+# ---------------------------
+# System state helpers
+# ---------------------------
+def load_system_state():
+    try:
+        with open(SYSTEM_STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        state = {"maintenance": False, "last_reboot": None, "uptime_start": datetime.now().isoformat()}
+        try:
+            with open(SYSTEM_STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(state, f)
+        except Exception:
+            pass
+        return state
+
+def save_system_state(state: dict):
+    try:
+        with open(SYSTEM_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception:
+        log_event("SYSTEM", None, "Failed to save system state")
+
+# ---------------------------
+# Helper utilities
+# ---------------------------
 def nearest_ten(value):
     try:
         return int(floor(float(value) / 10) * 10)
@@ -136,11 +163,7 @@ def nearest_ten(value):
         return 0
 
 def percent_of(balance, pct):
-    """Return nearest ten of (balance * pct/100)"""
-    try:
-        return nearest_ten(balance * pct / 100)
-    except Exception:
-        return 0
+    return nearest_ten(balance * pct / 100)
 
 def load_rules():
     if os.path.exists(RULES_FILE):
@@ -150,224 +173,62 @@ def load_rules():
     return "Rules not found."
 
 def track_user(user):
-    """Record user id and username in USERS_FILE (one per line: id,username)"""
-    if not user:
-        return
-    uid = getattr(user, "id", None)
-    uname = getattr(user, "username", "") or ""
-    if uid is None:
-        return
-    existing = {}
-    if os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split(",", 1)
-                try:
-                    existing[int(parts[0])] = parts[1] if len(parts) > 1 else ""
-                except Exception:
-                    continue
-    existing[uid] = uname
-    with open(USERS_FILE, "w", encoding="utf-8") as f:
-        for k, v in existing.items():
-            f.write(f"{k},{v}\n")
-    log_event("USERS", user, "Tracked user.")
-
-# ------------------------------
-# GAME LOGIC & HANDLERS (preserve original logic)
-# ------------------------------
-
-def start_cmd(update: Update, context: CallbackContext):
-    user = update.effective_user
-    track_user(user)
-    log_event("COMMAND", user, "/start invoked")
-    start_game_flow(update, context)
-
-def start_game_flow(update: Update, context: CallbackContext):
-    # Reset user_data for new session
-    context.user_data.clear()
-    context.user_data["input_buffer"] = ""
-    # Numeric keypad: digits on left, multipliers on right
-    keyboard = [
-        ["1", "2", "3", "10"],
-        ["4", "5", "6", "100"],
-        ["7", "8", "9", "1K"],
-        ["0", "Clear", "Enter", "10K"],
-    ]
-    update.message.reply_text(
-        "Game Started.\n\nPlease enter your Current Balance (e.g., 1000).\nYou can type a number or use the keypad below. Press Enter when ready.",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False),
-    )
-
-def reset(update: Update, context: CallbackContext):
-    user = update.effective_user
-    chat_id = update.effective_chat.id
-    log_event("COMMAND", user, "/reset invoked")
-
-    sent_messages = context.user_data.get("sent_messages", [])
-    deleted_count = 0
-
-    # Try deleting all stored bot messages for this chat
-    for mid in sent_messages:
-        try:
-            context.bot.delete_message(chat_id=chat_id, message_id=mid)
-            deleted_count += 1
-        except Exception:
-            continue
-
-    # Delete the user's command message too (optional, cleaner)
     try:
-        context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
+        # minimal user tracking - append to users file
+        users_file = os.path.join("logs", "users.txt")
+        if not os.path.exists(users_file):
+            with open(users_file, "w", encoding="utf-8") as f:
+                f.write("")
+        uid = getattr(user, "id", None)
+        uname = getattr(user, "username", "") or ""
+        if uid:
+            # append unique
+            with open(users_file, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            existing = {int(l.split(",",1)[0]): True for l in lines if l}
+            if uid not in existing:
+                with open(users_file, "a", encoding="utf-8") as f:
+                    f.write(f"{uid},{uname}\n")
+            log_event("USERS", user, "Tracked user")
     except Exception:
         pass
 
-    # Clear all session data
-    context.user_data.clear()
-    context.chat_data.clear()
+# ---------------------------
+# Generate keypad inline markup
+# ---------------------------
+def keypad_markup():
+    kb = [
+        [
+            InlineKeyboardButton("1", callback_data="num_1"),
+            InlineKeyboardButton("2", callback_data="num_2"),
+            InlineKeyboardButton("3", callback_data="num_3"),
+            InlineKeyboardButton("x10", callback_data="mul_10"),
+        ],
+        [
+            InlineKeyboardButton("4", callback_data="num_4"),
+            InlineKeyboardButton("5", callback_data="num_5"),
+            InlineKeyboardButton("6", callback_data="num_6"),
+            InlineKeyboardButton("x100", callback_data="mul_100"),
+        ],
+        [
+            InlineKeyboardButton("7", callback_data="num_7"),
+            InlineKeyboardButton("8", callback_data="num_8"),
+            InlineKeyboardButton("9", callback_data="num_9"),
+            InlineKeyboardButton("x1K", callback_data="mul_1000"),
+        ],
+        [
+            InlineKeyboardButton("0", callback_data="num_0"),
+            InlineKeyboardButton("Clear", callback_data="clr"),
+            InlineKeyboardButton("Enter", callback_data="enter"),
+            InlineKeyboardButton("x10K", callback_data="mul_10000"),
+        ],
+    ]
+    return InlineKeyboardMarkup(kb)
 
-    # Log and confirm
-    log_event("SYSTEM", user, f"Session reset. Deleted {deleted_count} messages.")
-    update.message.reply_text(
-        f"♻️ Session cleared. {deleted_count} previous messages deleted.\n"
-        "You can start a new one anytime with /start."
-    )
-
-
-def process_balance(update: Update, context: CallbackContext):
-    """
-    Handles keypad tokens and manual numeric input.
-    - Buffer behavior: digits and multiplier tokens append to buffer (and echo)
-    - Clear resets buffer
-    - Enter finalizes buffer and starts session
-    - Manual numbers are accepted immediately as final when not a keypad token
-    """
-    user = update.effective_user
-    text = update.message.text.strip()
-    log_event("COMMAND", user, f"Text received: {text}")
-
-    buf = context.user_data.get("input_buffer", "")
-
-    token = text.upper()
-
-    # keypad tokens that append to buffer
-    if token in {"0","1","2","3","4","5","6","7","8","9"}:
-        buf += token
-        context.user_data["input_buffer"] = buf
-        update.message.reply_text(f"Buffer: {buf}")
-        return
-
-    if token in {"10", "100"}:
-        buf += token
-        context.user_data["input_buffer"] = buf
-        update.message.reply_text(f"Buffer: {buf}")
-        return
-
-    if token == "1K":
-        if buf == "":
-            buf = "1000"
-        else:
-            buf = buf + "000"
-        context.user_data["input_buffer"] = buf
-        update.message.reply_text(f"Buffer: {buf}")
-        return
-
-    if token == "10K":
-        if buf == "":
-            buf = "10000"
-        else:
-            buf = buf + "0000"
-        context.user_data["input_buffer"] = buf
-        update.message.reply_text(f"Buffer: {buf}")
-        return
-
-    if token == "CLEAR":
-        context.user_data["input_buffer"] = ""
-        update.message.reply_text("Buffer cleared. Enter digits.")
-        return
-
-    if token == "ENTER":
-        raw = context.user_data.get("input_buffer", "")
-        if raw == "":
-            update.message.reply_text("Buffer empty. Type or tap digits first.")
-            return
-        final_txt = raw.upper()
-        if final_txt.endswith("K"):
-            try:
-                num = float(final_txt[:-1])
-                final_txt = str(int(num * 1000))
-            except Exception:
-                update.message.reply_text("Invalid number in buffer.")
-                return
-        if not final_txt.replace(".", "", 1).isdigit():
-            update.message.reply_text("Buffer doesn't contain a valid number.")
-            return
-        try:
-            balance = float(final_txt)
-        except Exception:
-            update.message.reply_text("Invalid numeric value.")
-            return
-        # proceed to start session
-    else:
-        # If the user typed a manual number (not a keypad token)
-        txt = text.upper()
-        # allow suffix K (e.g., 1K)
-        if txt.endswith("K"):
-            try:
-                num = float(txt[:-1])
-                txt = str(int(num * 1000))
-            except Exception:
-                update.message.reply_text("Please enter a valid number (e.g., 1000).")
-                return
-        if not txt.replace(".", "", 1).isdigit():
-            update.message.reply_text("Please enter a valid numeric balance (e.g., 1000).")
-            return
-        try:
-            balance = float(txt)
-        except Exception:
-            update.message.reply_text("Please enter a valid number (e.g., 1000).")
-            return
-
-    # Now we have 'balance' finalized
-    balance = nearest_ten(balance)
-    log_event("GAME", user, f"Balance entered: ₹{balance}")
-    track_user(user)
-
-    # initialize session state
-    context.user_data["BaseBalance"] = balance
-    context.user_data["Round"] = 1
-    context.user_data["Path"] = None
-    context.user_data["Wins"] = 0
-    context.user_data["Losses"] = 0
-    context.user_data["TotalPlaced"] = 0
-    context.user_data["Profit"] = 0
-    context.user_data["seq"] = []
-    context.user_data["input_buffer"] = ""
-
-    # remove keypad
-    update.message.reply_text("Balance saved. Let's begin!", reply_markup=ReplyKeyboardRemove())
-
-    # Round 1 investment (always 10% of base)
-    investment = percent_of(balance, CASE1[0])
-    context.user_data["TotalPlaced"] += investment
-    update.message.reply_text(f"Round 1: Place ₹{investment} (10% of ₹{balance}).")
-    buttons = [[InlineKeyboardButton("Win", callback_data="r1_win"), InlineKeyboardButton("Lose", callback_data="r1_lose")]]
-    update.message.reply_text("Round 1 result?", reply_markup=InlineKeyboardMarkup(buttons))
-
-# ------------------------------
-# Simulation helpers for summary & estimate
-# ------------------------------
+# ---------------------------
+# SESSION helpers: simulate session profits (existing logic)
+# ---------------------------
 def simulate_session_profit_for_path(base_balance: int, outcomes):
-    """
-    Simulate profit for a given sequence of 'W'/'L' outcomes
-    - base balance remains constant
-    - CASE chosen by first round (W => CASE1, L => CASE2)
-    - win => gain equal to investment (gross), taxed 10% on the profit portion
-    - lose => investment is lost
-    - stop rules: if a win occurs after round1, stop (session ends). Max rounds per case apply.
-    Returns integer profit (rounded to nearest ten).
-    """
     profit = 0
     if not outcomes:
         return 0
@@ -380,10 +241,10 @@ def simulate_session_profit_for_path(base_balance: int, outcomes):
         pct = percentages[round_no - 1]
         invest = percent_of(base_balance, pct)
         if res == "W":
-            gross_profit = invest  # you get invested amount as profit (receive 2x investment but profit = investment)
+            gross_profit = invest
             tax = gross_profit * TAX_RATE
-            net_profit = gross_profit - tax
-            profit += net_profit
+            net = gross_profit - tax
+            profit += net
             if round_no > 1:
                 break
         else:
@@ -392,18 +253,12 @@ def simulate_session_profit_for_path(base_balance: int, outcomes):
     return int(profit)
 
 def generate_possible_sequences():
-    """
-    Generate all possible outcome sequences respecting stop rules and max lengths.
-    """
     sequences = []
-
     def rec(seq):
-        # If sequence ended with W after round>1, it's terminal
         if seq and seq[-1] == "W" and len(seq) > 1:
             sequences.append(seq.copy())
             return
         if not seq:
-            # first round can be W or L
             rec(["W"])
             rec(["L"])
             return
@@ -412,12 +267,9 @@ def generate_possible_sequences():
         if len(seq) >= max_len:
             sequences.append(seq.copy())
             return
-        # continue sequences
         rec(seq + ["W"])
         rec(seq + ["L"])
-
     rec([])
-    # dedupe (shouldn't be necessary)
     unique = []
     seen = set()
     for s in sequences:
@@ -435,30 +287,79 @@ def compute_all_session_profits(base_balance):
         out.append((s, p))
     return out
 
-def compute_weighted_daily_profit(base_balance):
-    """
-    Weighted daily profit: 80% of worst-case profit + 20% average of other scenarios.
-    Returns nearest ten integer.
-    """
-    all_profits = [p for (_, p) in compute_all_session_profits(base_balance)]
-    if not all_profits:
+def worst_session_profit(base_balance: int) -> int:
+    all_pairs = compute_all_session_profits(base_balance)
+    if not all_pairs:
         return 0
-    worst = min(all_profits)
-    others = [x for x in all_profits if x != worst]
-    avg_others = int(sum(others) / len(others)) if others else worst
-    weighted = 0.8 * worst + 0.2 * avg_others
-    return nearest_ten(weighted)
+    profits = [int(p) for (_, p) in all_pairs]
+    return nearest_ten(min(profits)) if profits else 0
 
-# ------------------------------
-# Handle round results & session progression
-# ------------------------------
+# ---------------------------
+# Estimate compounding worst-case (3 sessions per day)
+# ---------------------------
+def estimate_compound_worst(base_balance: int, days: int, sessions_per_day: int = 3):
+    b = nearest_ten(base_balance)
+    history = []
+    for d in range(1, days + 1):
+        day_record = {"day": d, "start_balance": b, "session_profits": [], "end_balance": None}
+        for s in range(sessions_per_day):
+            profit = worst_session_profit(b)
+            profit = nearest_ten(profit)
+            day_record["session_profits"].append(int(profit))
+            b = nearest_ten(b + profit)
+        day_record["end_balance"] = b
+        history.append(day_record)
+    return b, history
+
+# ---------------------------
+# Game flow: preserve original logic for /start
+# We'll implement start handler to collect balance via keypad and then call this
+# ---------------------------
+def start_game_with_balance(update_or_query, context: CallbackContext, balance: float):
+    """
+    Accept either an Update.message or a CallbackQuery (we pass update_or_query as object).
+    This function implements the original logic of rounds and progression.
+    """
+    try:
+        # Determine update context: message or callback
+        # We need a way to send messages: use context.bot.send_message(chat_id, ...)
+        if isinstance(update_or_query, Update):
+            chat_id = update_or_query.effective_chat.id
+        else:
+            # CallbackQuery
+            chat_id = update_or_query.message.chat_id
+
+        # We'll initialize session state in context.user_data
+        context.user_data["BaseBalance"] = balance
+        context.user_data["Round"] = 1
+        context.user_data["Path"] = None
+        context.user_data["Wins"] = 0
+        context.user_data["Losses"] = 0
+        context.user_data["TotalPlaced"] = 0
+        context.user_data["Profit"] = 0
+        context.user_data["seq"] = []
+
+        # Round 1 investment
+        invest = percent_of(balance, CASE1[0])  # Round1 always 10%
+        context.user_data["TotalPlaced"] += invest
+        context.bot.send_message(chat_id=chat_id, text=f"Round 1: Place ₹{invest} (10% of ₹{balance}).")
+        buttons = [[InlineKeyboardButton("Win", callback_data="r1_win"), InlineKeyboardButton("Lose", callback_data="r1_lose")]]
+        context.bot.send_message(chat_id=chat_id, text="Round 1 result?", reply_markup=InlineKeyboardMarkup(buttons))
+        log_event("GAME", context._user_id if hasattr(context, "_user_id") else None, f"Started game with balance {balance}")
+    except Exception as e:
+        log_event("SYSTEM", None, f"start_game_with_balance error: {e}")
+        traceback.print_exc()
+
+# ---------------------------
+# Handle result callbacks (keep original logic semantics)
+# ---------------------------
 def handle_result(update: Update, context: CallbackContext):
     query = update.callback_query
+    user = query.from_user
     query.answer()
-    user = update.effective_user
-    log_event("GAME", user, f"Callback {query.data}")
-
-    # load session
+    log_event("GAME", user, f"Result callback {query.data}")
+    data = query.data  # e.g., r1_win
+    # session
     base_balance = context.user_data.get("BaseBalance", 0)
     round_no = context.user_data.get("Round", 1)
     path = context.user_data.get("Path")
@@ -468,11 +369,10 @@ def handle_result(update: Update, context: CallbackContext):
     losses = context.user_data.get("Losses", 0)
     seq = context.user_data.get("seq", [])
 
-    data = query.data  # e.g., r1_win or r2_lose
     is_win = data.endswith("_win")
-    result_label = "W" if is_win else "L"
+    label = "W" if is_win else "L"
 
-    # Determine path if first round
+    # determine path on round 1
     if round_no == 1:
         path = "case1" if is_win else "case2"
         context.user_data["Path"] = path
@@ -485,10 +385,10 @@ def handle_result(update: Update, context: CallbackContext):
 
     if is_win:
         wins += 1
-        gross_profit = invest  # profit equals investment
+        gross_profit = invest
         tax = gross_profit * TAX_RATE
-        net_profit = gross_profit - tax
-        profit += net_profit
+        net = gross_profit - tax
+        profit += net
         context.user_data["Profit"] = nearest_ten(profit)
         context.user_data["Wins"] = wins
     else:
@@ -497,10 +397,10 @@ def handle_result(update: Update, context: CallbackContext):
         context.user_data["Profit"] = nearest_ten(profit)
         context.user_data["Losses"] = losses
 
-    seq.append(result_label)
+    seq.append(label)
     context.user_data["seq"] = seq
 
-    # Compute best/worst sequences for remark
+    # compute best/worst sequences for remark
     all_profits = compute_all_session_profits(base_balance)
     if all_profits:
         sorted_by = sorted(all_profits, key=lambda x: x[1])
@@ -518,9 +418,7 @@ def handle_result(update: Update, context: CallbackContext):
     else:
         remark = f"{current_seq_str} -> Moderate performance"
 
-    # End conditions:
-    # - If win after round 1 (i.e., round_no > 1 and current is win) -> end
-    # - OR if reached max rounds for this case -> end
+    # end conditions
     ended = False
     if is_win and round_no > 1:
         ended = True
@@ -528,11 +426,10 @@ def handle_result(update: Update, context: CallbackContext):
         ended = True
 
     if ended:
-        # finalize session summary
         total_rounds_played = round_no
         total_placed = context.user_data.get("TotalPlaced", 0)
         total_profit = context.user_data.get("Profit", 0)
-        profit_after_tax = nearest_ten(total_profit)  # profit already net-of-tax where wins occurred
+        profit_after_tax = nearest_ten(total_profit)
         updated_balance = nearest_ten(base_balance + profit_after_tax)
 
         summary = (
@@ -551,7 +448,7 @@ def handle_result(update: Update, context: CallbackContext):
         context.user_data.clear()
         return
 
-    # Otherwise go to next round
+    # otherwise move to next round
     next_round = round_no + 1
     context.user_data["Round"] = next_round
     next_pct = percentages[next_round - 1]
@@ -559,171 +456,462 @@ def handle_result(update: Update, context: CallbackContext):
     context.user_data["TotalPlaced"] += next_invest
 
     query.message.reply_text(f"Round {next_round}: Place ₹{next_invest} ({next_pct}% of ₹{base_balance}).")
-    buttons = [
-        [InlineKeyboardButton("Win", callback_data=f"r{next_round}_win"), InlineKeyboardButton("Lose", callback_data=f"r{next_round}_lose")]
-    ]
+    buttons = [[InlineKeyboardButton("Win", callback_data=f"r{next_round}_win"), InlineKeyboardButton("Lose", callback_data=f"r{next_round}_lose")]]
     query.message.reply_text(f"Round {next_round} result?", reply_markup=InlineKeyboardMarkup(buttons))
 
-# ------------------------------
-# Estimation command (/estimate)
-# ------------------------------
-def estimate_cmd(update: Update, context: CallbackContext):
-    user = update.effective_user
-    log_event("COMMAND", user, "/estimate invoked")
-    # use base balance from args or session
-    args = context.args
-    if args:
+# ---------------------------
+# Keypad handling callbacks (buffered inline keypad, multipliers multiply buffer)
+# ---------------------------
+def handle_keypad(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    user = query.from_user
+    data = query.data  # e.g., num_5, mul_100, clr, enter
+    buffer = context.user_data.get("buffer", "0")
+    if data.startswith("num_"):
+        d = data.split("_",1)[1]
+        if buffer == "0":
+            buffer = d
+        else:
+            buffer = buffer + d
+    elif data.startswith("mul_"):
         try:
-            bal = float(args[0])
+            mult = int(data.split("_",1)[1])
+            # multiply buffer value
+            val = int(buffer) if buffer.isdigit() else 0
+            val = val * mult
+            buffer = str(val)
         except Exception:
-            return update.message.reply_text("Usage: /estimate [balance]")
-    else:
-        bal = context.user_data.get("BaseBalance")
-        if not bal:
-            return update.message.reply_text("No balance found in session. Provide: /estimate 500")
+            buffer = "0"
+    elif data == "clr":
+        buffer = "0"
+    elif data == "enter":
+        # finalize buffer and proceed depending on expect_balance_for
+        try:
+            val = int(buffer) if buffer.isdigit() else float(buffer)
+            val = float(val)
+        except Exception:
+            try:
+                query.message.edit_text("⚠️ Please enter a valid numeric value.", reply_markup=query.message.reply_markup)
+            except Exception:
+                pass
+            return
+        balance = nearest_ten(val)
+        expect = context.user_data.get("expect_balance_for")
+        # acknowledge and remove keypad message
+        try:
+            query.message.edit_text(f"Balance confirmed: ₹{balance}")
+        except Exception:
+            pass
+        context.user_data["buffer"] = "0"
+        context.user_data["expect_balance_for"] = None
+        if expect == "start":
+            start_game_with_balance(query, context, balance)
+            return
+        if expect == "estimate":
+            # ask days
+            ask_estimate_days_from_query(query, context, balance)
+            return
+        # no expectation
+        try:
+            query.message.reply_text("No active request. Use /start or /estimate.")
+        except Exception:
+            pass
+        return
+    # store buffer and update display
+    context.user_data["buffer"] = buffer
+    # edit message text to show buffer
+    try:
+        query.message.edit_text(f"💰 Current Input: `{buffer}`", reply_markup=query.message.reply_markup, parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        pass
 
-    bal = nearest_ten(float(bal))
-
-    # compute daily weighted profit
-    daily = compute_weighted_daily_profit(bal)
-    if daily == 0:
-        return update.message.reply_text("Could not compute estimate (insufficient data).")
-
-    # compound day-by-day
-    def compound(start, days):
-        b = start
-        for _ in range(days):
-            p = compute_weighted_daily_profit(b)
-            b = nearest_ten(b + p)
-        return b
-
-    res10 = compound(bal, 10)
-    res20 = compound(bal, 20)
-    res30 = compound(bal, 30)
-
-    update.message.reply_text(f"Estimated balance after 10 days: ₹{res10}")
-    update.message.reply_text(f"Estimated balance after 20 days: ₹{res20}")
-    update.message.reply_text(f"Estimated balance after 30 days: ₹{res30}")
-
-# ------------------------------
-# /rules and /commands
-# ------------------------------
-def rules_cmd(update: Update, context: CallbackContext):
+# ---------------------------
+# /start handler - sends keypad (buffering)
+# ---------------------------
+def cmd_start(update: Update, context: CallbackContext):
     user = update.effective_user
-    log_event("COMMAND", user, "/rules invoked")
-    rules_text = load_rules()
-    update.message.reply_text(f"Platform Rules:\n\n{rules_text}", parse_mode=ParseMode.MARKDOWN)
+    if in_maintenance() and not is_creator(user):
+        update.message.reply_text("🚧 Down for maintenance. Please try again later.")
+        return
+    track_user(user)
+    log_event("COMMAND", user, "/start")
+    context.user_data["buffer"] = "0"
+    context.user_data["expect_balance_for"] = "start"
+    # send keypad message
+    msg = update.message.reply_text("💰 Please enter your current balance (press Enter when done).", reply_markup=keypad_markup())
+    # track bot message ids for reset deletion
+    context.user_data.setdefault("sent_messages", []).append(msg.message_id)
 
-def commands_cmd(update: Update, context: CallbackContext):
+# ---------------------------
+# /estimate flow: prompt for balance (same keypad), then ask days
+# ---------------------------
+def cmd_estimate(update: Update, context: CallbackContext):
     user = update.effective_user
-    log_event("COMMAND", user, "/commands invoked")
-    cmds = (
-        "Available Commands:\n\n"
-        "/start – Start predictions\n"
-        "/reset – Reset session\n"
-        "/rules – Show rules\n"
-        "/commands – List commands\n"
-        "/estimate [balance] – Estimate growth (10/20/30 days)\n"
+    if in_maintenance() and not is_creator(user):
+        update.message.reply_text("🚧 Down for maintenance. Please try again later.")
+        return
+    track_user(user)
+    log_event("COMMAND", user, "/estimate")
+    context.user_data["buffer"] = "0"
+    context.user_data["expect_balance_for"] = "estimate"
+    msg = update.message.reply_text("💰 Please enter your current balance for estimation (press Enter when done).", reply_markup=keypad_markup())
+    context.user_data.setdefault("sent_messages", []).append(msg.message_id)
+
+def ask_estimate_days_from_query(query, context: CallbackContext, base_balance: float):
+    # send inline buttons for days
+    buttons = [
+        [InlineKeyboardButton("10 Days", callback_data="est_10"), InlineKeyboardButton("20 Days", callback_data="est_20")],
+        [InlineKeyboardButton("30 Days", callback_data="est_30"), InlineKeyboardButton("60 Days", callback_data="est_60")],
+        [InlineKeyboardButton("90 Days", callback_data="est_90")],
+    ]
+    try:
+        query.message.reply_text("📆 Select the number of days for estimation:", reply_markup=InlineKeyboardMarkup(buttons))
+    except Exception:
+        pass
+    context.user_data["estimate_balance"] = base_balance
+
+def handle_estimate_days(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    user = query.from_user
+    if in_maintenance() and not is_creator(user):
+        query.message.reply_text("🚧 Down for maintenance. Please try again later.")
+        return
+    data = query.data
+    if not data.startswith("est_"):
+        return
+    days = int(data.split("_",1)[1])
+    base = context.user_data.get("estimate_balance")
+    if base is None:
+        query.message.reply_text("No balance found for estimation. Use /estimate to start again.")
+        return
+    log_event("GAME", user, f"Estimate for {days} days, base ₹{base}")
+    final_balance, hist = estimate_compound_worst(base, days, sessions_per_day=3)
+    d1 = hist[0] if hist else {}
+    msg = (
+        f"Estimate for {days} days (worst-case sessions, 3/day)\n"
+        f"Start Balance: ₹{base}\n"
+        f"End Balance: ₹{final_balance}\n"
     )
-    update.message.reply_text(cmds, parse_mode=ParseMode.MARKDOWN)
+    if d1:
+        msg += f"Day 1: start ₹{d1['start_balance']} -> sessions {d1['session_profits']} -> end ₹{d1['end_balance']}"
+    query.message.reply_text(msg)
 
-# ------------------------------
-# Creator login (/roka) and /logs (creator-only)
-# ------------------------------
-def roka_cmd(update: Update, context: CallbackContext):
+# ---------------------------
+# /rules and /commands
+# ---------------------------
+def cmd_rules(update: Update, context: CallbackContext):
     user = update.effective_user
-    log_event("COMMAND", user, "/roka invoked")
-    if CREATOR_ID and user.id == int(CREATOR_ID):
-        update.message.reply_text("🧠 Creator access verified. Welcome, Roka.")
+    if in_maintenance() and not is_creator(user):
+        update.message.reply_text("🚧 Down for maintenance. Please try again later.")
+        return
+    log_event("COMMAND", user, "/rules")
+    update.message.reply_text(f"📜 Platform Rules:\n\n{load_rules()}", parse_mode=ParseMode.MARKDOWN)
+
+def cmd_commands(update: Update, context: CallbackContext):
+    user = update.effective_user
+    if in_maintenance() and not is_creator(user):
+        update.message.reply_text("🚧 Down for maintenance. Please try again later.")
+        return
+    log_event("COMMAND", user, "/commands")
+    msg = (
+        "📜 Available Commands:\n\n"
+        "/start — Start a new session\n"
+        "/estimate — Estimate future profits\n"
+        "/rules — Platform rules\n"
+        "/commands — This command list\n"
+        "/reset — Clear your session/chat (deletes bot messages for your chat)\n"
+    )
+    update.message.reply_text(msg)
+
+# ---------------------------
+# /reset handler - deletes bot messages for this chat and clears session
+# ---------------------------
+def cmd_reset(update: Update, context: CallbackContext):
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    # creator allowed even in maintenance
+    if in_maintenance() and not is_creator(user):
+        update.message.reply_text("🚧 Down for maintenance. Please try again later.")
+        return
+    log_event("COMMAND", user, "/reset")
+    sent = context.user_data.get("sent_messages", [])
+    deleted = 0
+    for mid in sent:
+        try:
+            context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            deleted += 1
+        except Exception:
+            continue
+    # try deleting the /reset message itself
+    try:
+        context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
+    except Exception:
+        pass
+    context.user_data.clear()
+    update.message.reply_text(f"♻️ Session cleared. {deleted} bot messages deleted.")
+    log_event("SYSTEM", user, f"Reset performed. Deleted {deleted} messages.")
+
+# ---------------------------
+# Creator utilities
+# ---------------------------
+def is_creator(user):
+    try:
+        return CREATOR_ID and user and int(user.id) == int(CREATOR_ID)
+    except Exception:
+        return False
+
+def in_maintenance():
+    state = load_system_state()
+    return bool(state.get("maintenance", False))
+
+def notify_creator(bot, text):
+    try:
+        if CREATOR_ID:
+            bot.send_message(chat_id=int(CREATOR_ID), text=text)
+            log_event("SYSTEM", None, f"Creator notified: {text}")
+    except Exception:
+        log_event("SYSTEM", None, f"Failed to notify creator: {text}")
+
+# /roka - creator login and menu
+def cmd_roka(update: Update, context: CallbackContext):
+    user = update.effective_user
+    log_event("COMMAND", user, "/roka")
+    if is_creator(user):
+        msg = (
+            "🧠 Creator Access Granted\n\n"
+            "Commands:\n"
+            "• /down — Put bot Down for maintenance\n"
+            "• /restart — Restart bot (keep data, bring back from Down)\n"
+            "• /reboot — Full reboot (clear all data)\n"
+            "• /status — Show system status\n"
+            "• /logs — Show last 30 log entries\n"
+        )
+        update.message.reply_text(msg)
         log_event("CREATOR", user, "/roka success")
     else:
         update.message.reply_text("❌ Unauthorized command.")
-        log_event("CREATOR", user, "/roka failed - unauthorized")
+        log_event("CREATOR", user, "/roka failed")
 
-def logs_cmd(update: Update, context: CallbackContext):
+def cmd_down(update: Update, context: CallbackContext):
     user = update.effective_user
-    log_event("COMMAND", user, "/logs invoked")
-    if not (CREATOR_ID and user.id == int(CREATOR_ID)):
-        update.message.reply_text("You are not authorized to view logs.")
-        log_event("CREATOR", user, "/logs access denied")
+    if not is_creator(user):
+        update.message.reply_text("❌ Unauthorized.")
+        log_event("CREATOR", user, "/down unauthorized")
         return
+    state = load_system_state()
+    state["maintenance"] = True
+    save_system_state(state)
+    update.message.reply_text("🚧 Bot is now Down for maintenance.")
+    log_event("CREATOR", user, "Set bot Down for maintenance")
+    notify_creator(context.bot, "🚧 Bot set Down for maintenance by Creator.")
+
+def cmd_restart(update: Update, context: CallbackContext):
+    user = update.effective_user
+    if not is_creator(user):
+        update.message.reply_text("❌ Unauthorized.")
+        log_event("CREATOR", user, "/restart unauthorized")
+        return
+    # clear maintenance flag and notify
+    state = load_system_state()
+    state["maintenance"] = False
+    state["last_reboot"] = datetime.now().isoformat()
+    save_system_state(state)
+    update.message.reply_text("🔄 Restarting bot... Please wait.\nColorElephant Bot will be live again shortly. ✨")
+    log_event("CREATOR", user, "Restart invoked")
+    notify_creator(context.bot, "🔄 Bot restart requested by Creator.")
+    # no actual process restart here; just flip maintenance & notify
+
+def cmd_reboot(update: Update, context: CallbackContext):
+    user = update.effective_user
+    if not is_creator(user):
+        update.message.reply_text("❌ Unauthorized.")
+        log_event("CREATOR", user, "/reboot unauthorized")
+        return
+    # Full reboot: clear dispatcher user_data and chat_data if accessible
+    update.message.reply_text("⚙️ System rebooting... All session data will be cleared.")
+    log_event("CREATOR", user, "Reboot invoked - clearing all data")
+    notify_creator(context.bot, "⚙️ System reboot in progress (requested by Creator).")
+    # Attempt to clear dispatcher stores
     try:
-        with open(LOG_FILE, "r", encoding="utf-8") as f:
-            lines = f.readlines()[-30:]
-        if not lines:
+        dp = context.dispatcher
+        if hasattr(dp, "user_data"):
+            dp.user_data.clear()
+        if hasattr(dp, "chat_data"):
+            dp.chat_data.clear()
+        # clear any stored files (users, users.txt)
+        users_file = os.path.join("logs", "users.txt")
+        try:
+            if os.path.exists(users_file):
+                os.remove(users_file)
+        except Exception:
+            pass
+        # reset system_state
+        state = {"maintenance": False, "last_reboot": datetime.now().isoformat(), "uptime_start": datetime.now().isoformat()}
+        save_system_state(state)
+    except Exception as e:
+        log_event("SYSTEM", None, f"Reboot clearing error: {e}")
+    notify_creator(context.bot, "✅ Reboot complete. Bot is live.")
+    log_event("CREATOR", user, "Reboot complete")
+
+def cmd_status(update: Update, context: CallbackContext):
+    user = update.effective_user
+    if not is_creator(user):
+        update.message.reply_text("❌ Unauthorized.")
+        return
+    state = load_system_state()
+    maintenance = state.get("maintenance", False)
+    last_reboot = state.get("last_reboot")
+    uptime_start = state.get("uptime_start")
+    # user count estimate from logs/users.txt
+    users_file = os.path.join("logs", "users.txt")
+    users_count = 0
+    try:
+        if os.path.exists(users_file):
+            with open(users_file, "r", encoding="utf-8") as f:
+                users_count = len([l for l in f.read().splitlines() if l.strip()])
+    except Exception:
+        users_count = 0
+    msg = (
+        f"System Status:\n"
+        f"• Maintenance: {'ON' if maintenance else 'OFF'}\n"
+        f"• Last Reboot: {last_reboot}\n"
+        f"• Uptime Start: {uptime_start}\n"
+        f"• Known Users: {users_count}\n"
+    )
+    update.message.reply_text(msg)
+
+def cmd_logs(update: Update, context: CallbackContext):
+    user = update.effective_user
+    if not is_creator(user):
+        update.message.reply_text("❌ Unauthorized.")
+        log_event("CREATOR", user, "/logs unauthorized")
+        return
+    # read last 30 lines from today's log (and previous if needed)
+    try:
+        # find most recent log files in logs/
+        files = sorted([os.path.join(LOGS_DIR, f) for f in os.listdir(LOGS_DIR) if f.endswith(".log")])
+        if not files:
+            update.message.reply_text("No logs available.")
+            return
+        # read last 30 lines across files starting from newest
+        lines = []
+        for path in reversed(files):
+            with open(path, "r", encoding="utf-8") as f:
+                lines.extend(f.read().splitlines())
+            if len(lines) >= 30:
+                break
+        last30 = "\n".join(lines[-30:])
+        if not last30:
             update.message.reply_text("No logs found.")
             return
-        text = "".join(lines[-30:])
-        if len(text) > 3900:
-            text = text[-3900:]
-        update.message.reply_text("Last logs:\n```\n" + text + "\n```", parse_mode=ParseMode.MARKDOWN)
-        log_event("CREATOR", user, "/logs displayed")
+        # send in code block
+        if len(last30) > 3900:
+            last30 = last30[-3900:]
+        update.message.reply_text("Last logs:\n```\n" + last30 + "\n```", parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         update.message.reply_text(f"Error reading logs: {e}")
-        log_event("SYSTEM", user, f"/logs error: {e}")
+        log_event("SYSTEM", None, f"/logs error: {e}")
 
-# ------------------------------
-# Unknown handler
-# ------------------------------
-def unknown_cmd(update: Update, context: CallbackContext):
+# ---------------------------
+# Unknown handler for commands - invalid command behavior
+# ---------------------------
+def unknown_handler(update: Update, context: CallbackContext):
     user = update.effective_user
-    log_event("COMMAND", user, f"Unknown or unsupported: {update.message.text}")
-    update.message.reply_text("Sorry, I am not programmed to answer this. Try /start or /commands.")
+    txt = update.message.text if update.message else ""
+    if txt and txt.startswith("/"):
+        # unknown command
+        if in_maintenance() and not is_creator(user):
+            update.message.reply_text("🚧 Down for maintenance. Please try again later.")
+            return
+        update.message.reply_text("❌ Invalid command. Use /commands to see available options.")
+        log_event("COMMAND", user, f"Invalid command: {txt}")
+    else:
+        # if plain text and user is expected to enter balance, process handled in keypad flow via callback; otherwise ignore
+        update.message.reply_text("❌ Invalid command. Use /commands to see available options.")
 
-# ------------------------------
-# MAIN - setup handlers and webhook
-# ------------------------------
-def main():
-    # Basic validation
+# ---------------------------
+# Dispatcher and webhook setup
+# ---------------------------
+def build_dispatcher_and_start():
     if not BOT_TOKEN:
-        logger.error("BOT_TOKEN not set in environment.")
+        logger.error("BOT_TOKEN not set. Exiting.")
         return
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
-    # User commands
-    dp.add_handler(CommandHandler("start", start_cmd))
-    dp.add_handler(CommandHandler("reset", reset_cmd))
-    dp.add_handler(CommandHandler("estimate", estimate_cmd))
-    dp.add_handler(CommandHandler("rules", rules_cmd))
-    dp.add_handler(CommandHandler("commands", commands_cmd))
+    # Command handlers
+    dp.add_handler(CommandHandler("start", cmd_start))
+    dp.add_handler(CommandHandler("estimate", cmd_estimate))
+    dp.add_handler(CommandHandler("rules", cmd_rules))
+    dp.add_handler(CommandHandler("commands", cmd_commands))
+    dp.add_handler(CommandHandler("reset", cmd_reset))
 
-    # Creator commands
-    dp.add_handler(CommandHandler("roka", roka_cmd))
-    dp.add_handler(CommandHandler("logs", logs_cmd))
+    # Creator handlers
+    dp.add_handler(CommandHandler("roka", cmd_roka))
+    dp.add_handler(CommandHandler("down", cmd_down))
+    dp.add_handler(CommandHandler("restart", cmd_restart))
+    dp.add_handler(CommandHandler("reboot", cmd_reboot))
+    dp.add_handler(CommandHandler("status", cmd_status))
+    dp.add_handler(CommandHandler("logs", cmd_logs))
 
-    # Callbacks for round results
+    # Callback handlers
+    dp.add_handler(CallbackQueryHandler(handle_keypad, pattern="^(num_|mul_|clr|enter)"))
+    dp.add_handler(CallbackQueryHandler(handle_estimate_days, pattern="^est_"))
     dp.add_handler(CallbackQueryHandler(handle_result, pattern="^r"))
 
-    # Message handlers
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, process_balance))
-    dp.add_handler(MessageHandler(Filters.command, unknown_cmd))
+    # Unknown commands
+    dp.add_handler(MessageHandler(Filters.command, unknown_handler))
 
-    # Flask webhook endpoint
+    # For webhook: create Flask route to accept updates
     @app.route(f"/{BOT_TOKEN}", methods=["POST"])
     def webhook():
-        data = request.get_json(force=True)
-        update = Update.de_json(data, updater.bot)
-        dp.process_update(update)
+        try:
+            data = request.get_json(force=True)
+            update = Update.de_json(data, updater.bot)
+            dp.process_update(update)
+        except Exception as e:
+            log_event("SYSTEM", None, f"Webhook process error: {e}")
         return "ok", 200
 
-    # Set webhook for Render
+    # set webhook if RENDER_URL present
     try:
-        updater.bot.delete_webhook()
-    except Exception:
-        pass
-    try:
-        if not RENDER_URL:
-            logger.warning("RENDER_URL not set; webhook won't be configured automatically.")
-            log_event("SYSTEM", None, "RENDER_URL not set - webhook not configured.")
-        else:
+        if RENDER_URL:
             wh = f"{RENDER_URL.rstrip('/')}/{BOT_TOKEN}"
             updater.bot.set_webhook(wh)
             log_event("SYSTEM", None, f"Webhook set to {wh}")
+        else:
+            log_event("SYSTEM", None, "RENDER_URL not set; webhook not configured.")
     except Exception as e:
         log_event("SYSTEM", None, f"Failed to set webhook: {e}")
 
-    # Run Flask app (this will keep the process alive on Render)
+    # Start Flask app (this will block; Render uses this)
+    # Note: Updater isn't used to start polling; webhook handles updates
+    return updater, dp
+
+# ---------------------------
+# MAIN
+# ---------------------------
+def main():
+    try:
+        updater, dp = build_dispatcher_and_start()
+    except Exception as e:
+        log_event("SYSTEM", None, f"Dispatcher build failed: {e}")
+        return
+    # Load state, update uptime if not present
+    state = load_system_state()
+    if not state.get("uptime_start"):
+        state["uptime_start"] = datetime.now().isoformat()
+        save_system_state(state)
+    # Notify creator if maintenance was set or on restart
+    if state.get("maintenance"):
+        notify_creator(updater.bot, "🚧 Bot started in Down (maintenance) mode.")
+    else:
+        notify_creator(updater.bot, "✅ Bot started and is live.")
+
+    # Start Flask app (this call will run in Render)
+    # If you want to run locally, you can instead call updater.start_polling()
     app.run(host="0.0.0.0", port=8080)
 
 if __name__ == "__main__":
