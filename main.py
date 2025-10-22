@@ -315,7 +315,7 @@ def start_game_with_balance(update_or_query, context: CallbackContext, balance: 
         context.user_data["Wins"]=0; context.user_data["Losses"]=0
         context.user_data["TotalPlaced"]=0; context.user_data["Profit"]=0; context.user_data["seq"]=[]
         invest = percent_of(balance, CASE1[0])
-        context.user_data["TotalPlaced"] += invest
+        # DO NOT pre-add invest to TotalPlaced here (fixed)
         send_and_record(context, chat_id, f"Round 1: Place ₹{invest} (10% of ₹{balance}).")
         buttons=[[InlineKeyboardButton("Win", callback_data="r1_win"), InlineKeyboardButton("Lose", callback_data="r1_lose")]]
         send_and_record(context, chat_id, "Round 1 result?", reply_markup=InlineKeyboardMarkup(buttons))
@@ -346,6 +346,7 @@ def handle_result(update: Update, context: CallbackContext):
     percentages = CASE1 if path=="case1" else CASE2
     max_rounds = len(percentages)
     invest = percent_of(base_balance, percentages[round_no-1])
+    # add current round investment now (fixed)
     context.user_data["TotalPlaced"] = total_placed + invest
     if is_win:
         wins += 1
@@ -391,7 +392,7 @@ def handle_result(update: Update, context: CallbackContext):
         context.user_data.clear(); return
     next_round = round_no + 1; context.user_data["Round"] = next_round
     next_pct = percentages[next_round - 1]; next_invest = percent_of(base_balance, next_pct)
-    context.user_data["TotalPlaced"] += next_invest
+    # DO NOT pre-add next_invest here (fixed)
     send_and_record(context, query.message.chat_id, f"Round {next_round}: Place ₹{next_invest} ({next_pct}% of ₹{base_balance}).")
     buttons = [[InlineKeyboardButton("Win", callback_data=f"r{next_round}_win"), InlineKeyboardButton("Lose", callback_data=f"r{next_round}_lose")]]
     send_and_record(context, query.message.chat_id, f"Round {next_round} result?", reply_markup=InlineKeyboardMarkup(buttons))
@@ -442,9 +443,9 @@ def cmd_start(update: Update, context: CallbackContext):
     user = update.effective_user
     update_user_record(user)
     if is_user_banned(user.id) and not is_creator(user):
-        update.message.reply_text("⚠️ Access denied. You are banned from using this bot."); log_event("BLOCKED", user, "start"); return
+        update.message.reply_text("⚠️ Access denied. You are banned from using this bot"); log_event("BLOCKED", user, "start"); return
     if in_maintenance() and not is_creator(user):
-        update.message.reply_text("🚧 Down for maintenance. Please try again later."); return
+        update.message.reply_text("🚧 Down for maintenance. Please try again later"); return
     log_event("COMMAND", user, "/start")
     context.user_data["buffer"]="0"; context.user_data["expect_balance_for"]="start"
     msg = update.message.reply_text("💰 Please enter your current balance (press Enter when done).", reply_markup=keypad_markup())
@@ -455,9 +456,9 @@ def cmd_estimate(update: Update, context: CallbackContext):
     user = update.effective_user
     update_user_record(user)
     if is_user_banned(user.id) and not is_creator(user):
-        update.message.reply_text("⚠️ Access denied. You are banned from using this bot."); log_event("BLOCKED", user, "estimate"); return
+        update.message.reply_text("⚠️ Access denied. You are banned from using this bot"); log_event("BLOCKED", user, "estimate"); return
     if in_maintenance() and not is_creator(user):
-        update.message.reply_text("🚧 Down for maintenance. Please try again later."); return
+        update.message.reply_text("🚧 Down for maintenance. Please try again later"); return
     log_event("COMMAND", user, "/estimate")
     context.user_data["buffer"]="0"; context.user_data["expect_balance_for"]="estimate"
     msg = update.message.reply_text("💰 Please enter your current balance for estimation (press Enter when done).", reply_markup=keypad_markup())
@@ -485,7 +486,7 @@ def handle_estimate_days(update: Update, context: CallbackContext):
         except: pass
         log_event("BLOCKED", user, "estimate_days"); return
     if in_maintenance() and not is_creator(user):
-        query.message.reply_text("🚧 Down for maintenance. Please try again later."); return
+        query.message.reply_text("🚧 Down for maintenance. Please try again later"); return
     data = query.data
     if not data.startswith("est_"): return
     days = int(data.split("_",1)[1]); base = context.user_data.get("estimate_balance")
@@ -502,9 +503,9 @@ def handle_estimate_days(update: Update, context: CallbackContext):
 def cmd_rules(update: Update, context: CallbackContext):
     user = update.effective_user; update_user_record(user)
     if is_user_banned(user.id) and not is_creator(user):
-        update.message.reply_text("⚠️ Access denied. You are banned from using this bot."); log_event("BLOCKED", user, "rules"); return
+        update.message.reply_text("⚠️ Access denied. You are banned from using this bot"); log_event("BLOCKED", user, "rules"); return
     if in_maintenance() and not is_creator(user):
-        update.message.reply_text("🚧 Down for maintenance. Please try again later."); return
+        update.message.reply_text("🚧 Down for maintenance. Please try again later"); return
     log_event("COMMAND", user, "/rules")
     m = update.message.reply_text(f"📜 Platform Rules:\n\n{load_rules()}", parse_mode=ParseMode.MARKDOWN)
     record_sent_message(update.effective_chat.id, m.message_id)
@@ -514,7 +515,7 @@ def cmd_commands(update: Update, context: CallbackContext):
     if is_user_banned(user.id) and not is_creator(user):
         update.message.reply_text("⚠️ Access denied. You are banned from using this bot"); log_event("BLOCKED", user, "commands"); return
     if in_maintenance() and not is_creator(user):
-        update.message.reply_text("🚧 Down for maintenance. Please try again later."); return
+        update.message.reply_text("🚧 Down for maintenance. Please try again later"); return
     log_event("COMMAND", user, "/commands")
     msg = ("📜 Available Commands:\n\n/start — Start a new session\n/estimate — Estimate future profits\n/rules — Show platform rules\n/commands — This command list\n/reset — Clear your session/chat")
     m = update.message.reply_text(msg); record_sent_message(update.effective_chat.id, m.message_id)
