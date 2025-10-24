@@ -2,7 +2,8 @@ import os
 import logging
 from threading import Thread
 from flask import Flask, jsonify
-from telegram import Update, ParseMode
+from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import (
     Updater,
     CommandHandler,
@@ -28,7 +29,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("TELEGRAM_BOT")
 
-
 # =============================
 # FLASK APP (for Render + UptimeRobot)
 # =============================
@@ -50,7 +50,6 @@ def ping():
 def run_flask():
     """Run Flask app in a separate thread for Render deployment."""
     app.run(host='0.0.0.0', port=8080)
-
 
 # =============================
 # BOT COMMANDS
@@ -87,8 +86,6 @@ def main():
     # Register commands
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("clear", clear))
-
-    # Default handler for random text
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, start))
 
     # Set webhook for Render
