@@ -86,14 +86,11 @@ def home():
 
 
 @flask_app.route("/webhook", methods=["POST"])
-@flask_app.route('/webhook', methods=['POST'])
 def webhook():
-    """Receive updates from Telegram and pass them to the bot."""
     data = request.get_json(force=True)
     update = Update.de_json(data, telegram_app.bot)
     asyncio.get_event_loop().create_task(telegram_app.process_update(update))
     return '', 200
-
 
 # --- Initialize Telegram Application ---
 async def setup_bot():
