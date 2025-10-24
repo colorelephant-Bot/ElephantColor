@@ -25,7 +25,7 @@ logger = logging.getLogger("TELEGRAM_BOT")
 # FLASK SETUP
 # =============================
 flask_app = Flask(__name__)
-telegram_app = None  # will hold the Telegram bot instance
+telegram_app = None  # Global reference to Application instance
 
 
 @flask_app.route("/")
@@ -43,11 +43,12 @@ def ping():
 
 @flask_app.route("/webhook", methods=["POST"])
 def webhook():
-    """Synchronous Flask route that runs async Telegram handler."""
+    """Synchronous route for Telegram webhook updates."""
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, telegram_app.bot)
-        asyncio.run(telegram_app.process_update(update))
+        # use create_task instead of asyncio.run (runs in same loop)
+        asyncio.create_task(telegram_app.process_update(update))
     except Exception as e:
         logger.error(f"[ERROR] Exception in webhook handler: {e}", exc_info=True)
     return "", 200
@@ -70,17 +71,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # TELEGRAM INITIALIZATION
 # =============================
 async def setup_telegram():
-    """Initialize Telegram bot and set webhook."""
+    """Initialize Telegram bot, set webhook, and prepare for updates."""
     global telegram_app
     telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Register handlers
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start))
 
     webhook_url = f"{RENDER_URL}/webhook"
-    info = await telegram_app.bot.get_webhook_info()
 
+    logger.info(f"[SYSTEM] Initializing bot and webhook...")
+
+    # Properly initialize the Application
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.updater.start_polling()  # ensures dispatcher loop runs
+
+    info = await telegram_app.bot.get_webhook_info()
     if info.url != webhook_url:
         logger.info(f"[SYSTEM] Setting webhook to {webhook_url}")
         await telegram_app.bot.delete_webhook()
@@ -88,7 +95,7 @@ async def setup_telegram():
     else:
         logger.info(f"[SYSTEM] Webhook already set to {webhook_url}")
 
-    logger.info("✅ Telegram bot setup complete.")
+    logger.info("✅ Telegram bot setup and initialized successfully.")
 
 
 # =============================
@@ -96,13 +103,12 @@ async def setup_telegram():
 # =============================
 if __name__ == "__main__":
     logger.info("[SYSTEM] Starting bot setup...")
-
     try:
         asyncio.get_event_loop().run_until_complete(setup_telegram())
-        logger.info("[SYSTEM] Webhook and bot initialized successfully.")
+        logger.info("[SYSTEM] Bot initialized and webhook active.")
     except Exception as e:
         logger.error(f"[FATAL] Bot setup failed: {e}", exc_info=True)
 
-    # Always start Flask, even if setup fails
+    # Keep Flask running for Render port binding
     logger.info(f"[SYSTEM] Starting Flask server on port {PORT} ...")
     flask_app.run(host="0.0.0.0", port=PORT)
