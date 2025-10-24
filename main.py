@@ -1,121 +1,92 @@
 import os
 import logging
-import asyncio
-from flask import Flask, request
+from threading import Thread
+from flask import Flask, jsonify
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder,
+    Updater,
     CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
+    CallbackContext,
 )
-from prettytable import PrettyTable
 
-# --- Logging ---
+# =============================
+# CONFIGURATION
+# =============================
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+RENDER_URL = os.environ.get("RENDER_URL")  # e.g. https://your-app-name.onrender.com
+
+# =============================
+# LOGGING SETUP
+# =============================
+
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
+    level=logging.INFO
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("TELEGRAM_BOT")
 
-# --- Environment Variables ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://your-app-name.onrender.com/webhook
-PORT = int(os.environ.get("PORT", 5000))
+# =============================
+# FLASK APP (for Render + UptimeRobot)
+# =============================
 
-# --- Flask app ---
-flask_app = Flask(__name__)
-telegram_app = None
+app = Flask(__name__)
 
-
-# --- Telegram Handlers ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Welcome! Please enter your *current balance:*",
-        parse_mode="Markdown",
-    )
-
-
-async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle user input (balance) and send calculation tables."""
-    try:
-        balance = float(update.message.text)
-
-        # Case 1 (Win Scenario)
-        case1 = [10, 10, 15, 30, 55]
-        table1 = PrettyTable(["Round", "Percentage", "Amount"])
-        for i, p in enumerate(case1, start=1):
-            table1.add_row([i, f"{p}%", f"{(balance * p / 100):.2f}"])
-
-        # Case 2 (Lose Scenario)
-        case2 = [10, 25, 65]
-        table2 = PrettyTable(["Round", "Percentage", "Amount"])
-        for i, p in enumerate(case2, start=1):
-            table2.add_row([i, f"{p}%", f"{(balance * p / 100):.2f}"])
-
-        message = (
-            f"💰 *Initial Balance:* {balance:.2f}\n\n"
-            f"📊 *Case 1 (Win Scenario)*\n```\n{table1}\n```\n"
-            f"📉 *Case 2 (Lose Scenario)*\n```\n{table2}\n```"
-        )
-
-        await update.message.reply_text(message, parse_mode="Markdown")
-
-    except ValueError:
-        await update.message.reply_text("❌ Please enter a valid number for your balance.")
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🧮 *Usage Guide:*\n"
-        "1️⃣ Send /start to begin.\n"
-        "2️⃣ Enter your current balance.\n"
-        "3️⃣ The bot will show you two cases:\n"
-        "   - Case 1 (Win scenario)\n"
-        "   - Case 2 (Lose scenario)",
-        parse_mode="Markdown",
-    )
-
-
-# --- Flask Routes ---
-@flask_app.route("/", methods=["GET"])
+@app.route('/')
 def home():
-    """Health check endpoint."""
-    return "✅ Bot is running and healthy!", 200
+    logger.info("[PING] Root endpoint hit.")
+    return "✅ Bot is running."
+
+@app.route('/ping')
+def ping():
+    """For UptimeRobot health checks."""
+    logger.info("[PING] UptimeRobot ping received.")
+    return jsonify(status="ok", message="Bot alive"), 200
 
 
-@flask_app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, telegram_app.bot)
-    asyncio.get_event_loop().create_task(telegram_app.process_update(update))
-    return '', 200
+def run_flask():
+    """Run Flask app in a separate thread."""
+    app.run(host='0.0.0.0', port=8080)
 
-# --- Initialize Telegram Application ---
-async def setup_bot():
-    """Build bot app and set webhook."""
-    global telegram_app
+# =============================
+# BOT COMMANDS
+# =============================
 
-    telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
+def start(update: Update, context: CallbackContext):
+    """Respond to /start command."""
+    user = update.effective_user
+    logger.info(f"[COMMAND] /start by {user.first_name} ({user.id})")
+    update.message.reply_text(
+        "👋 Hello! The bot is live and working via webhook.\n\n"
+        "Send /start anytime to check connectivity."
+    )
 
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("help", help_command))
-    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_balance))
+# =============================
+# MAIN FUNCTION (Webhook Mode)
+# =============================
 
-    # --- Auto re-register webhook if needed ---
-    webhook_info = await telegram_app.bot.get_webhook_info()
-    if webhook_info.url != WEBHOOK_URL:
-        await telegram_app.bot.delete_webhook()
-        await telegram_app.bot.set_webhook(url=WEBHOOK_URL)
-        logger.info(f"✅ Webhook set to: {WEBHOOK_URL}")
-    else:
-        logger.info("🔄 Webhook already set correctly.")
+def main():
+    logger.info("[SYSTEM] Bot starting up...")
 
-    return telegram_app
+    # Start Flask server for Render and uptime pings
+    Thread(target=run_flask).start()
+
+    # Initialize Updater and Dispatcher
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
+
+    # Add only /start command
+    dp.add_handler(CommandHandler("start", start))
+
+    # Set webhook for Telegram → Render
+    webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
+    updater.bot.set_webhook(url=webhook_url)
+    logger.info(f"[SYSTEM] Webhook set to {webhook_url}")
+
+    # Start webhook listener (port 8443)
+    updater.start_webhook(listen="0.0.0.0", port=8443, url_path=BOT_TOKEN)
+    updater.idle()
 
 
 if __name__ == "__main__":
-    # Initialize bot and run Flask web server
-    asyncio.get_event_loop().run_until_complete(setup_bot())
-    flask_app.run(host="0.0.0.0", port=PORT)
+    main()
