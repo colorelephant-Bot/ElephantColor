@@ -1,102 +1,68 @@
 import os
 import logging
-from threading import Thread
-from flask import Flask, jsonify
+import asyncio
+from flask import Flask, request, jsonify
 from telegram import Update
-from telegram.constants import ParseMode
-from telegram.ext import (
-    Updater,
-    CommandHandler,
-    MessageHandler,
-    Filters,
-    CallbackContext
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
-# =============================
-# CONFIGURATION
-# =============================
-
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-RENDER_URL = os.environ.get("RENDER_URL")  # Example: https://your-app-name.onrender.com
-
-# =============================
-# LOGGING SETUP
-# =============================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+RENDER_URL = os.getenv("RENDER_URL")
+PORT = int(os.environ.get("PORT", 8080))
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
 )
 logger = logging.getLogger("TELEGRAM_BOT")
 
-# =============================
-# FLASK APP (for Render + UptimeRobot)
-# =============================
+flask_app = Flask(__name__)
+telegram_app = None
 
-app = Flask(__name__)
 
-@app.route('/')
+@flask_app.route("/")
 def home():
-    logger.info("[PING] Root endpoint hit.")
     return "✅ Bot is running and healthy."
 
-@app.route('/ping')
+
+@flask_app.route("/ping")
 def ping():
-    """For UptimeRobot health checks."""
-    logger.info("[PING] UptimeRobot ping received.")
     return jsonify(status="ok", message="Bot alive"), 200
 
 
-def run_flask():
-    """Run Flask app in a separate thread for Render deployment."""
-    app.run(host='0.0.0.0', port=8080)
+@flask_app.route("/webhook", methods=["POST"])
+async def webhook():
+    data = await request.get_json(force=True)
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return "", 200
 
-# =============================
-# BOT COMMANDS
-# =============================
 
-def start(update: Update, context: CallbackContext):
-    """Respond to /start command."""
-    user = update.effective_user
-    logger.info(f"[COMMAND] /start by {user.first_name} ({user.id})")
-    update.message.reply_text(
-        "👋 Hello! I’m alive and working through webhook.\n\n"
-        "Send /start anytime to test bot connectivity.",
-        parse_mode=ParseMode.MARKDOWN
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Hello! The bot is live and working via webhook.\n\n"
+        "Send /start anytime to test connectivity."
     )
 
-def clear(update: Update, context: CallbackContext):
-    """Optional reset command."""
-    context.user_data.clear()
-    logger.info(f"[COMMAND] /clear by {update.effective_user.id}")
-    update.message.reply_text("✅ Chat data cleared.")
 
+async def setup_telegram():
+    global telegram_app
+    telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
+    telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start))
 
-# =============================
-# MAIN BOT (Webhook Mode)
-# =============================
+    webhook_url = f"{RENDER_URL}/webhook"
+    info = await telegram_app.bot.get_webhook_info()
+    if info.url != webhook_url:
+        logger.info(f"Setting webhook to {webhook_url}")
+        await telegram_app.bot.delete_webhook()
+        await telegram_app.bot.set_webhook(url=webhook_url)
+    else:
+        logger.info(f"Webhook already set to {webhook_url}")
 
-def main():
-    logger.info("[SYSTEM] Bot startup initiated.")
-    Thread(target=run_flask).start()
-
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
-
-    # Register commands
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("clear", clear))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, start))
-
-    # Set webhook for Render
-    webhook_url = f"{RENDER_URL}/webhook/{BOT_TOKEN}"
-    updater.bot.set_webhook(url=webhook_url)
-    logger.info(f"[SYSTEM] Webhook set to {webhook_url}")
-
-    # Start webhook listener (port 8443)
-    updater.start_webhook(listen="0.0.0.0", port=8443, url_path=BOT_TOKEN)
-    updater.idle()
+    logger.info("✅ Telegram bot setup complete.")
 
 
 if __name__ == "__main__":
-    main()
+    logger.info("Starting bot...")
+    asyncio.get_event_loop().run_until_complete(setup_telegram())
+    flask_app.run(host="0.0.0.0", port=PORT)
