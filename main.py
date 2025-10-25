@@ -86,7 +86,7 @@ def handle_message(update: Update, context: CallbackContext):
     case1_table = PrettyTable()
     case1_table.field_names = ["Round", "Amount", "Result"]
     case1_table.align = "l"
-    case1_table.set_style(PrettyTable.MSWORD_FRIENDLY)
+    case1_table.border = True
 
     for i, p in enumerate(case1_perc, start=1):
         amt = math.floor(balance * p / 100)
@@ -103,20 +103,21 @@ def handle_message(update: Update, context: CallbackContext):
     case2_table = PrettyTable()
     case2_table.field_names = ["Round", "Amount", "Result"]
     case2_table.align = "l"
-    case2_table.set_style(PrettyTable.MSWORD_FRIENDLY)
+    case2_table.border = True
 
     for i, p in enumerate(case2_perc, start=1):
         amt = math.floor(balance * p / 100)
         case2_table.add_row([f"Round {i}", f"{amt}", case2_res[i - 1]])
 
-    # Nicely formatted output for Telegram
+    # Table header formatting for Telegram
     def format_table(title, table):
         border = "═" * (len(title) + 4)
         return f"╔{border}╗\n║  *{title}*  ║\n╚{border}╝\n```\n{table}\n```"
 
     message = (
         f"📊 {format_table('CASE I', case1_table)}\n\n"
-        f"📉 {format_table('CASE II', case2_table)}"
+        f"📉 {format_table('CASE II', case2_table)}\n\n"
+        f"💡 *All amounts are rounded down to the previous whole number.*"
     )
 
     update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
