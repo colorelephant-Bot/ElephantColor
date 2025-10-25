@@ -1,4 +1,5 @@
 import os
+import math
 import logging
 from flask import Flask, request
 from telegram import Update, ParseMode
@@ -42,17 +43,20 @@ def webhook():
 # =============================
 # BOT LOGIC
 # =============================
-user_state = {}  # track waiting users
+user_state = {}
 
 def start(update: Update, context: CallbackContext):
     """Ask user to enter balance."""
     user_id = update.effective_user.id
     user_state[user_id] = "WAITING_FOR_BALANCE"
-    update.message.reply_text("💰 Please enter your *current balance* (numbers only):", parse_mode=ParseMode.MARKDOWN)
+    update.message.reply_text(
+        "💰 Please enter your *current balance* (numbers only):",
+        parse_mode=ParseMode.MARKDOWN,
+    )
     logger.info(f"/start from {user_id}")
 
 def handle_message(update: Update, context: CallbackContext):
-    """Handle user balance input and table generation."""
+    """Handle user balance input and generate tables."""
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
@@ -60,47 +64,62 @@ def handle_message(update: Update, context: CallbackContext):
         update.message.reply_text("Send /start to begin.")
         return
 
-    # Validate numeric input
-    if not text.replace('.', '', 1).isdigit():
-        update.message.reply_text("❌ Kindly enter *numbers only.*", parse_mode=ParseMode.MARKDOWN)
+    if not text.replace(".", "", 1).isdigit():
+        update.message.reply_text(
+            "❌ Kindly enter *numbers only.*", parse_mode=ParseMode.MARKDOWN
+        )
         return
 
     balance = float(text)
     user_state.pop(user_id, None)
 
-    # ===== CASE I =====
-    case1_percentages = [10, 10, 15, 30, 55]
-    case1_results = [
+    # ========== CASE I ==========
+    case1_perc = [10, 10, 15, 30, 55]
+    case1_res = [
         "If win, follow Case I",
         "If win session ends, If lost next round",
         "If win session ends, If lost next round",
         "If win session ends, If lost next round",
-        "Last round, 99% win possibility"
+        "Last round, 99% win possibility",
     ]
 
     case1_table = PrettyTable()
     case1_table.field_names = ["Round", "Amount", "Result"]
-    for i, p in enumerate(case1_percentages, start=1):
-        amt = round(balance * p / 100, 2)
-        case1_table.add_row([f"Round {i}", f"{amt}", case1_results[i - 1]])
+    case1_table.align = "l"
+    case1_table.set_style(PrettyTable.MSWORD_FRIENDLY)
 
-    # ===== CASE II =====
-    case2_percentages = [10, 25, 65]
-    case2_results = [
+    for i, p in enumerate(case1_perc, start=1):
+        amt = math.floor(balance * p / 100)
+        case1_table.add_row([f"Round {i}", f"{amt}", case1_res[i - 1]])
+
+    # ========== CASE II ==========
+    case2_perc = [10, 25, 65]
+    case2_res = [
         "If lost, use Case II",
         "If win session ends, If lost next round",
-        "Last round, 99% win possibility"
+        "Last round, 99% win possibility",
     ]
 
     case2_table = PrettyTable()
     case2_table.field_names = ["Round", "Amount", "Result"]
-    for i, p in enumerate(case2_percentages, start=1):
-        amt = round(balance * p / 100, 2)
-        case2_table.add_row([f"Round {i}", f"{amt}", case2_results[i - 1]])
+    case2_table.align = "l"
+    case2_table.set_style(PrettyTable.MSWORD_FRIENDLY)
 
-    # Combine tables in one message
-    response = f"📊 *Case I*\n```\n{case1_table}\n```\n📉 *Case II*\n```\n{case2_table}\n```"
-    update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+    for i, p in enumerate(case2_perc, start=1):
+        amt = math.floor(balance * p / 100)
+        case2_table.add_row([f"Round {i}", f"{amt}", case2_res[i - 1]])
+
+    # Nicely formatted output for Telegram
+    def format_table(title, table):
+        border = "═" * (len(title) + 4)
+        return f"╔{border}╗\n║  *{title}*  ║\n╚{border}╝\n```\n{table}\n```"
+
+    message = (
+        f"📊 {format_table('CASE I', case1_table)}\n\n"
+        f"📉 {format_table('CASE II', case2_table)}"
+    )
+
+    update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
 # =============================
 # TELEGRAM INITIALIZATION
@@ -114,10 +133,8 @@ dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_me
 # MAIN
 # =============================
 if __name__ == "__main__":
-    # Set webhook for Render
     webhook_url = f"{RENDER_URL}/{BOT_TOKEN}"
     updater.bot.set_webhook(webhook_url)
     logger.info(f"✅ Webhook set to {webhook_url}")
 
-    # Start Flask app
     app.run(host="0.0.0.0", port=PORT)
