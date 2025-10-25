@@ -6,10 +6,7 @@ import threading
 import requests
 from flask import Flask, request
 from telegram import Update, ParseMode
-from telegram.ext import (
-    Updater, CommandHandler, MessageHandler, Filters, CallbackContext
-)
-from prettytable import PrettyTable
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 
 # =============================
 # CONFIGURATION
@@ -17,7 +14,7 @@ from prettytable import PrettyTable
 BOT_TOKEN   = os.environ.get("BOT_TOKEN")
 RENDER_URL  = os.environ.get("RENDER_URL")  # e.g. https://colorelephantbot.onrender.com
 PORT        = int(os.environ.get("PORT", 8443))
-PING_DELAY  = 5     # seconds between pings
+PING_DELAY  = 5  # seconds between pings
 
 # =============================
 # LOGGING
@@ -26,8 +23,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     level=logging.INFO,
     handlers=[
-        logging.FileHandler("bot.log"),   # full persistent log
-        logging.StreamHandler()           # still echo to console
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
@@ -44,7 +41,6 @@ def home():
 
 @app.route("/" + BOT_TOKEN, methods=["POST"])
 def webhook():
-    """Receive updates from Telegram via webhook."""
     update = Update.de_json(request.get_json(force=True), updater.bot)
     dispatcher.process_update(update)
     return "ok", 200
@@ -53,7 +49,7 @@ def webhook():
 # HEALTH PINGER THREAD
 # =============================
 def ping_self():
-    """Continuously ping the bot every 5 seconds and log results."""
+    """Ping the bot every few seconds and log the result."""
     url = f"{RENDER_URL}/"
     while True:
         try:
@@ -72,6 +68,7 @@ def ping_self():
 user_state = {}
 
 def start(update: Update, context: CallbackContext):
+    """Start command – ask user for balance."""
     user_id = update.effective_user.id
     user_state[user_id] = "WAITING_FOR_BALANCE"
     update.message.reply_text(
@@ -81,6 +78,7 @@ def start(update: Update, context: CallbackContext):
     logger.info(f"/start from {user_id}")
 
 def handle_message(update: Update, context: CallbackContext):
+    """Handle user input and respond with Case I & II info."""
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
@@ -96,46 +94,35 @@ def handle_message(update: Update, context: CallbackContext):
 
     balance = float(text)
     user_state.pop(user_id, None)
+    logger.info(f"[BALANCE INPUT] User {user_id} entered balance {balance}")
 
     # ---- CASE I ----
-    c1_perc = [10, 10, 15, 30, 55]
-    c1_res  = [
-        "If win, follow Case I",
-        "If win session ends, If lost next round",
-        "If win session ends, If lost next round",
-        "If win session ends, If lost next round",
-        "Last round, 99% win possibility",
-    ]
-    c1_tbl = PrettyTable(["Round", "Amount", "Result"])
-    c1_tbl.align, c1_tbl.border = "l", True
-    for i, p in enumerate(c1_perc, 1):
-        amt = math.floor(balance * p / 100)
-        c1_tbl.add_row([f"Round {i}", amt, c1_res[i-1]])
+    case1_perc = [10, 10, 15, 30, 55]
+    case1_amounts = [math.floor(balance * p / 100) for p in case1_perc]
+    case1_text = (
+        f"📊 *CASE I*\n"
+        f"Round 1️⃣: ₹{case1_amounts[0]} — If win, ✅ follow Case I\n"
+        f"Round 2️⃣: ₹{case1_amounts[1]} — If win, ✅ session ends; if lost, 🔄 next round\n"
+        f"Round 3️⃣: ₹{case1_amounts[2]} — If win, ✅ session ends; if lost, 🔄 next round\n"
+        f"Round 4️⃣: ₹{case1_amounts[3]} — If win, ✅ session ends; if lost, 🔄 next round\n"
+        f"Round 5️⃣: ₹{case1_amounts[4]} — 🎯 Last round, 99 % win possibility\n"
+    )
 
     # ---- CASE II ----
-    c2_perc = [10, 25, 65]
-    c2_res  = [
-        "If lost, use Case II",
-        "If win session ends, If lost next round",
-        "Last round, 99% win possibility",
-    ]
-    c2_tbl = PrettyTable(["Round", "Amount", "Result"])
-    c2_tbl.align, c2_tbl.border = "l", True
-    for i, p in enumerate(c2_perc, 1):
-        amt = math.floor(balance * p / 100)
-        c2_tbl.add_row([f"Round {i}", amt, c2_res[i-1]])
-
-    def format_table(title, table):
-        border = "═" * (len(title) + 4)
-        return f"╔{border}╗\n║  *{title}*  ║\n╚{border}╝\n```\n{table}\n```"
-
-    msg = (
-        f"📊 {format_table('CASE I', c1_tbl)}\n\n"
-        f"📉 {format_table('CASE II', c2_tbl)}\n\n"
-        f"💡 *All amounts are rounded down to the previous whole number.*"
+    case2_perc = [10, 25, 65]
+    case2_amounts = [math.floor(balance * p / 100) for p in case2_perc]
+    case2_text = (
+        f"\n📉 *CASE II*\n"
+        f"Round 1️⃣: ₹{case2_amounts[0]} — If lost, 🔄 use Case II\n"
+        f"Round 2️⃣: ₹{case2_amounts[1]} — If win, ✅ session ends; if lost, 🔄 next round\n"
+        f"Round 3️⃣: ₹{case2_amounts[2]} — 🎯 Last round, 99 % win possibility\n"
     )
-    update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
-    logger.info(f"[BALANCE] {user_id} → {balance}")
+
+    final_message = (
+        f"{case1_text}{case2_text}\n💡 *All amounts are rounded down to the previous whole number.*"
+    )
+
+    update.message.reply_text(final_message, parse_mode=ParseMode.MARKDOWN)
 
 # =============================
 # TELEGRAM INITIALIZATION
@@ -153,8 +140,8 @@ if __name__ == "__main__":
     updater.bot.set_webhook(webhook_url)
     logger.info(f"✅ Webhook set to {webhook_url}")
 
-    # Start background pinger
+    # Start background health pinger
     threading.Thread(target=ping_self, daemon=True).start()
 
-    # Start Flask app
+    # Start Flask server
     app.run(host="0.0.0.0", port=PORT)
