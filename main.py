@@ -75,29 +75,29 @@ def start(update: Update, context: CallbackContext):
     logger.info(f"/start from {user_id}")
 
 def reset(update: Update, context: CallbackContext):
-    """Reset only current user's session and last 20 messages."""
+    """Reset current user's session and try to delete recent messages."""
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
+    deleted_count = 0
 
     try:
-        # Attempt to delete the last 20 messages from this user
-        messages = context.bot.get_chat(chat_id).get_history(limit=20)
-        deleted_count = 0
-        for msg in messages:
-            if msg.from_user and msg.from_user.id == user_id:
-                try:
-                    context.bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
-                    deleted_count += 1
-                except Exception:
-                    pass  # Ignore individual message errors
+        # Try deleting the last 100 messages (recent chat)
+        current_msg_id = update.message.message_id
+        for msg_id in range(current_msg_id, current_msg_id - 100, -1):
+            try:
+                context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                deleted_count += 1
+            except Exception:
+                pass  # Ignore messages that can't be deleted
 
-        # Clear only this user's state
+        # Clear this user's state
         if user_id in user_state:
             del user_state[user_id]
 
-        if user_id in context.user_data:
-            context.user_data[user_id].clear()
+        if hasattr(context, "user_data"):
+            context.user_data.clear()
 
+        # Send confirmation
         context.bot.send_message(
             chat_id,
             f"♻️ Your session and {deleted_count} recent messages have been cleared.\nYou can start again with /start."
