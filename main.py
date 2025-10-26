@@ -75,34 +75,27 @@ def start(update: Update, context: CallbackContext):
     logger.info(f"/start from {user_id}")
 
 def reset(update: Update, context: CallbackContext):
-    """Reset current user's session and try to delete recent messages."""
+    """Reset current user's session and delete recent 20 messages."""
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    deleted_count = 0
 
     try:
-        # Try deleting the last 100 messages (recent chat)
+        # Delete last 20 messages to avoid delay
         current_msg_id = update.message.message_id
-        for msg_id in range(current_msg_id, current_msg_id - 100, -1):
+        for msg_id in range(current_msg_id, current_msg_id - 20, -1):
             try:
                 context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                deleted_count += 1
             except Exception:
-                pass  # Ignore messages that can't be deleted
+                pass  # ignore undeletable messages
 
-        # Clear this user's state
+        # Clear user's state
         if user_id in user_state:
             del user_state[user_id]
 
         if hasattr(context, "user_data"):
             context.user_data.clear()
 
-        # Send confirmation
-        context.bot.send_message(
-            chat_id,
-            f"♻️ Your session and {deleted_count} recent messages have been cleared.\nYou can start again with /start."
-        )
-        logger.info(f"[RESET] Cleared chat for user {user_id} ({deleted_count} messages deleted).")
+        logger.info(f"[RESET] Cleared chat for user {user_id} (last 20 messages).")
 
     except Exception as e:
         logger.error(f"[RESET ERROR] {e}")
@@ -130,7 +123,7 @@ def handle_message(update: Update, context: CallbackContext):
         case1_amounts = [math.floor(balance * p / 100) for p in case1_perc]
         case2_amounts = [math.floor(balance * p / 100) for p in case2_perc]
 
-        # Simple message without remarks
+        # Compose response
         message = (
             f"✅ *Your balance:* ₹{math.floor(balance)}\n\n"
             f"📊 *CASE I*\n"
@@ -143,7 +136,8 @@ def handle_message(update: Update, context: CallbackContext):
             f"Round 1️⃣: ₹{case2_amounts[0]}\n"
             f"Round 2️⃣: ₹{case2_amounts[1]}\n"
             f"Round 3️⃣: ₹{case2_amounts[2]}\n\n"
-            f"💡 All amounts are rounded down to the previous whole number."
+            f"💡 All amounts are rounded down to the previous whole number.\n\n"
+            f"⚠️ Kindly use /reset before starting a new session to clear cache."
         )
 
         update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
