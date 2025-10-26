@@ -14,7 +14,7 @@ from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, Callb
 BOT_TOKEN  = os.environ.get("BOT_TOKEN")
 RENDER_URL = os.environ.get("RENDER_URL")  # e.g. https://colorelephantbot.onrender.com
 PORT       = int(os.environ.get("PORT", 8443))
-PING_DELAY = 5  # seconds between pings
+PING_DELAY = 5  # seconds between health pings
 
 # =============================
 # LOGGING
@@ -75,36 +75,46 @@ def start(update: Update, context: CallbackContext):
     logger.info(f"/start from {user_id}")
 
 def reset(update: Update, context: CallbackContext):
-    """Reset command – clears data and deletes recent messages."""
+    """Reset only current user's session and last 20 messages."""
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
 
     try:
-        # Delete last 20 messages for a clean chat
+        # Attempt to delete the last 20 messages from this user
         messages = context.bot.get_chat(chat_id).get_history(limit=20)
+        deleted_count = 0
         for msg in messages:
-            try:
-                context.bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
-            except Exception:
-                pass  # Ignore if cannot delete a specific message
+            if msg.from_user and msg.from_user.id == user_id:
+                try:
+                    context.bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
+                    deleted_count += 1
+                except Exception:
+                    pass  # Ignore individual message errors
 
-        # Clear session and cached data
-        user_state.clear()
-        context.bot_data.clear()
-        context.user_data.clear()
+        # Clear only this user's state
+        if user_id in user_state:
+            del user_state[user_id]
 
-        context.bot.send_message(chat_id, "♻️ All sessions and messages have been reset.\nYou can start again with /start.")
-        logger.info(f"[RESET] User {user_id} reset session and chat.")
+        if user_id in context.user_data:
+            context.user_data[user_id].clear()
+
+        context.bot.send_message(
+            chat_id,
+            f"♻️ Your session and {deleted_count} recent messages have been cleared.\nYou can start again with /start."
+        )
+        logger.info(f"[RESET] Cleared chat for user {user_id} ({deleted_count} messages deleted).")
+
     except Exception as e:
         logger.error(f"[RESET ERROR] {e}")
-        update.message.reply_text("⚠️ Unable to clear chat fully, but session reset successfully.")
+        update.message.reply_text("⚠️ Unable to clear messages completely, but your session has been reset.")
 
 def handle_message(update: Update, context: CallbackContext):
-    """Handle balance input and show Case I & Case II directly."""
+    """Handle balance input and display Case I & Case II directly."""
     user_id = update.effective_user.id
     text = update.message.text.strip()
     state = user_state.get(user_id, {}).get("stage")
 
+    # Wait for balance input
     if state == "WAITING_FOR_BALANCE":
         if not text.replace(".", "", 1).isdigit():
             update.message.reply_text("❌ Kindly enter *numbers only.*", parse_mode=ParseMode.MARKDOWN)
@@ -114,13 +124,13 @@ def handle_message(update: Update, context: CallbackContext):
         user_state.pop(user_id, None)
         logger.info(f"[BALANCE INPUT] {user_id} entered balance {balance}")
 
-        # Calculate amounts
+        # Calculate case amounts
         case1_perc = [10, 10, 15, 30, 55]
         case2_perc = [10, 25, 65]
         case1_amounts = [math.floor(balance * p / 100) for p in case1_perc]
         case2_amounts = [math.floor(balance * p / 100) for p in case2_perc]
 
-        # Clean message
+        # Simple message without remarks
         message = (
             f"✅ *Your balance:* ₹{math.floor(balance)}\n\n"
             f"📊 *CASE I*\n"
@@ -135,10 +145,11 @@ def handle_message(update: Update, context: CallbackContext):
             f"Round 3️⃣: ₹{case2_amounts[2]}\n\n"
             f"💡 All amounts are rounded down to the previous whole number."
         )
+
         update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
         return
 
-    update.message.reply_text("Send /start to begin or /reset to clear the chat.")
+    update.message.reply_text("Send /start to begin or /reset to clear your chat.")
 
 # =============================
 # TELEGRAM INITIALIZATION
